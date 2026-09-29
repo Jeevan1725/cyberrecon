@@ -5,7 +5,7 @@
 flask>=2.3.0
 
 # === HTTP Client ===
-requests>=2.31.0
+requests>=2.34.2
 
 # === Images + QR Encoding ===
 pillow>=12.3.0
