@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+venv/
+venv_new/
+env/
+.venv/
+
+# PyInstaller
+*.spec.bak
+dist/
+build/
+
+# Test & coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# SAST / security reports
+reports/*.json
+reports/*.txt
+reports/*.html
+!reports/.gitkeep
+
+# Payloads (never commit — dangerous artifacts)
+payloads/*
+!payloads/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+cyberrecon.log
+
+# Env
+.env
+.env.local
+
+# Docker
+docker-compose.override.yml

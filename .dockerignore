@@ -1,0 +1,15 @@
+.git
+.github
+docs
+tests
+reports
+payloads
+scripts
+venv
+venv_new
+__pycache__
+*.pyc
+*.log
+.env
+*.md
+!README.md
