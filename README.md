@@ -78,6 +78,25 @@ Operator CLI ──► C2 Server (Flask) ──► QR PNG ──► Victim Clien
 
 \- AI agent (natural-language command parsing)
 
+### Why Selenium (and Chrome)?
+
+Mandiant's 2024 QR-C2 technique relies on a **real browser rendering
+the QR image as pixels**. That pixel stream is what bypasses
+browser-isolation products — they cannot strip what the user sees.
+
+A plain `requests.get()` only downloads a PNG; it does NOT reproduce
+the technique. Our client uses **Selenium + headless Chrome** to:
+
+- Reproduce the actual browser rendering pipeline (pixel channel)
+- Provide a real Chrome fingerprint (defeats headless-bot detection)
+- Auto-grant camera / microphone permissions (some RBI products block
+  dynamic media access before the QR renders)
+
+**Client prerequisite:** Google Chrome must be installed on the victim
+host. The client falls back to direct `requests`-based fetch if Chrome
+is unavailable — functionality preserved, stealth reduced.
+
+**Docker:** the provided `Dockerfile` installs Chrome automatically.
 
 
 \## Installation
