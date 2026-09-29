@@ -1,10 +1,11 @@
-# CyberRecon — Core runtime dependencies (reduced from 20+ to 8)
+# CyberRecon — Core runtime dependencies (reduced from 20+ to 9)
 
 flask>=2.3.0
 requests>=2.31.0
 pillow>=12.3.0
 qrcode[pil]>=8.2
-pyzbar>=0.1.9
+opencv-python>=4.8.0
+numpy>=1.24.0
 pynput>=1.7.6
 pyperclip>=1.11.0
 psutil>=5.9.6
