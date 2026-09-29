@@ -25,7 +25,7 @@ coverage.xml
 htmlcov/
 .tox/
 
-# SAST / security reports — final reports are committed as evidence,
+# SAST / security reports - final reports are committed as evidence,
 # but transient/working reports are ignored.
 reports/*.html
 reports/*-fixed.*
