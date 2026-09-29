@@ -17,11 +17,14 @@ class OperatorCLI:
         "system_info", "persist", "self_destruct", "shell", "list_files"
     ]
 
-    def __init__(self, c2_url, token=None):
+    def __init__(self, c2_url, token=None, ca_bundle=None):
         self.c2_url = c2_url.rstrip("/")
         self.session = requests.Session()
         if token:
             self.session.headers.update({"X-Operator-Token": token})
+        # TLS verification — default to True (verify system CAs).
+        # Set CYBERRECON_CA_BUNDLE to a PEM path for self-signed lab CA.
+        self.session.verify = ca_bundle if ca_bundle else True
         self.current_victim = None
 
     def banner(self):
@@ -152,6 +155,11 @@ def main():
         default=os.getenv("CYBERRECON_OPERATOR_TOKEN", ""),
         help="Operator API token (or set CYBERRECON_OPERATOR_TOKEN env var)",
     )
+    parser.add_argument(
+        "--ca-bundle",
+        default=os.getenv("CYBERRECON_CA_BUNDLE", ""),
+        help="Path to PEM CA bundle for TLS verification (default: system CAs)",
+    )
     args = parser.parse_args()
 
     if not args.token:
@@ -160,7 +168,15 @@ def main():
         print("    Protected endpoints will return 401.")
         print()
 
-    cli = OperatorCLI(args.c2, args.token)
+    if args.ca_bundle:
+        if not os.path.isfile(args.ca_bundle):
+            print(f"[!] ERROR: CA bundle not found: {args.ca_bundle}")
+            sys.exit(1)
+        print(f"[+] Using CA bundle: {args.ca_bundle}")
+    else:
+        print("[+] TLS verification: system CA store")
+
+    cli = OperatorCLI(args.c2, args.token, args.ca_bundle or None)
     cli.interactive()
 
 
