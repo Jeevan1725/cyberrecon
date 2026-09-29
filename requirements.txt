@@ -26,4 +26,4 @@ webdriver-manager>=4.0.1
 # === Client-side RAT features ===
 pynput>=1.7.6
 pyperclip>=1.11.0
-psutil>=5.9.6
+psutil>=7.2.2
