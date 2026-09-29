@@ -25,10 +25,13 @@ coverage.xml
 htmlcov/
 .tox/
 
-# SAST / security reports
-reports/*.json
-reports/*.txt
+# SAST / security reports — final reports are committed as evidence,
+# but transient/working reports are ignored.
 reports/*.html
+reports/*-fixed.*
+reports/semgrep.txt
+!reports/*.json
+!reports/*.txt
 !reports/.gitkeep
 
 # Payloads (never commit — dangerous artifacts)
