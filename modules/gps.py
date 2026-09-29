@@ -18,9 +18,12 @@ class GPSLocator:
 
     def locate(self):
         for service in self.services:
+            # B310 fix: enforce HTTPS scheme only
+            if not service.startswith("https://"):
+                continue
             try:
                 req = urllib.request.Request(service, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with urllib.request.urlopen(req, timeout=5) as resp:  # nosec B310
                     data = json.loads(resp.read().decode())
                     return {
                         "timestamp": datetime.now().isoformat(),

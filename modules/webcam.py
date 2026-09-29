@@ -4,8 +4,8 @@ Captures images from victim's webcam.
 """
 
 import base64
-from io import BytesIO
 from datetime import datetime
+from io import BytesIO
 
 try:
     import cv2

