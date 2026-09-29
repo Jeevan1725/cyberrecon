@@ -4,8 +4,8 @@ Captures screen images for exfiltration.
 """
 
 import base64
-from io import BytesIO
 from datetime import datetime
+from io import BytesIO
 
 try:
     import pyautogui
@@ -14,7 +14,7 @@ except ImportError:
     PYAUTOGUI_AVAILABLE = False
 
 try:
-    from PIL import Image
+    from PIL import Image  # noqa: F401 - imported for PIL_AVAILABLE check
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False

@@ -4,11 +4,11 @@ Acts as intermediary between victim and C2 to hide origin.
 Implements domain fronting and traffic relay for evasion.
 """
 
+import json
 import socket
 import threading
-import json
+
 import requests
-from datetime import datetime
 
 
 class AWSRelayServer:

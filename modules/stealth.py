@@ -3,13 +3,11 @@ CyberRecon Stealth & Anti-Forensics Module
 Self-destruct, trace cleaning, and evasion techniques.
 """
 
+import ctypes
 import os
-import sys
 import shutil
 import subprocess
 import tempfile
-import ctypes
-from pathlib import Path
 
 
 class StealthModule:
@@ -92,7 +90,7 @@ class StealthModule:
                 for ind in indicators:
                     if ind in name:
                         return True
-        except:
+        except Exception:  # noqa: BLE001 — intentional swallow in stealth context
             pass
         try:
             import uuid
