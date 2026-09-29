@@ -21,7 +21,7 @@ numpy>=1.24.0
 # plain requests.get(). Also auto-grants camera/media permissions
 # required by isolated-browser environments.
 selenium>=4.15.0
-webdriver-manager>=4.0.1
+webdriver-manager>=4.1.2
 
 # === Client-side RAT features ===
 pynput>=1.7.6
