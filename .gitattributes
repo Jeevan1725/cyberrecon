@@ -1,0 +1,36 @@
+# Auto-detect text files and normalize line endings
+* text=auto
+
+# Explicitly declare text files (LF in repo, native on checkout)
+*.py      text
+*.md      text
+*.txt     text
+*.toml    text
+*.yml     text
+*.yaml    text
+*.json    text
+*.html    text
+*.css     text
+*.js      text
+*.sh      text eol=lf
+*.bat     text eol=crlf
+*.ps1     text eol=crlf
+
+# Binary files (do not touch)
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.pdf     binary
+*.zip     binary
+*.exe     binary
+*.dll     binary
+*.so      binary
+*.dylib   binary
+
+# Linguist overrides — fix HTML language detection
+*.py linguist-language=Python
+reports/* linguist-generated=true
+payloads/* linguist-generated=true
+docs/report/* linguist-documentation=true
