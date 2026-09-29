@@ -3,7 +3,7 @@
 flask>=2.3.0
 requests>=2.31.0
 pillow>=12.3.0
-qrcode[pil]>=7.4.2
+qrcode[pil]>=8.2
 pyzbar>=0.1.9
 pynput>=1.7.6
 pyperclip>=1.11.0
