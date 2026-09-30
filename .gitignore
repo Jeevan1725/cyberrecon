@@ -13,7 +13,9 @@ venv_new/
 env/
 .venv/
 
+
 # PyInstaller
+*.spec
 *.spec.bak
 dist/
 build/
