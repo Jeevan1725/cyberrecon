@@ -2,6 +2,26 @@
 
 
 
+\*\*Format:\*\* PlantUML
+
+
+
+\*\*Source file:\*\* \[use-case.puml](use-case.puml)
+
+
+
+\## Rendered Diagram
+
+
+
+!\[Use Case Diagram](http://www.plantuml.com/plantuml/proxy?cache=no\&src=https://raw.githubusercontent.com/Jeevan1725/cyberrecon/main/docs/diagrams/use-case.puml)
+
+
+
+\## PlantUML Source
+
+
+
 ```plantuml
 
 @startuml
@@ -62,12 +82,6 @@ rectangle "CyberRecon - QR-Code-Based C2 Framework" {
 
 
 
-' =========================
-
-' Operator Relationships
-
-' =========================
-
 OP --> UC1
 
 OP --> UC3
@@ -78,14 +92,6 @@ OP --> UC11
 
 OP --> UC12
 
-
-
-' =========================
-
-' Victim Host Relationships
-
-' =========================
-
 VH --> UC2
 
 VH --> UC5
@@ -94,35 +100,13 @@ VH --> UC7
 
 VH --> UC8
 
-
-
-' =========================
-
-' C2 Server Relationships
-
-' =========================
-
 C2 --> UC4
 
 C2 --> UC9
 
-
-
-' =========================
-
-' Defender Relationships
-
-' =========================
-
 DF --> UC12 : reads IOCs
 
 
-
-' =========================
-
-' Include Relationships
-
-' =========================
 
 UC3 ..> UC1 : <<include>>
 
