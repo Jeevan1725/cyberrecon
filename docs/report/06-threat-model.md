@@ -140,30 +140,18 @@ By mapping to ATT&CK, defenders can build detections for each technique (e.g., S
 
 ## 6. Attack Tree (Defensive Detection Perspective)
 
-```
-Root: Detect CyberRecon Deployment
-├── Network-layer signals
-│   ├── Repeated POST to /exfil/* every 15s → beaconing
-│   ├── HTTP (not HTTPS) to unknown IP on 8443 → weak signal
-│   └── Headless Chrome spawning from non-browser parent → strong signal
-│
-├── Host-layer signals (Windows)
-│   ├── Registry Run key: HKCU\...\Run\WindowsSecurityUpdate → persistence IOC
-│   ├── Scheduled task: WindowsUpdateTask → persistence IOC
-│   ├── Startup folder: update.exe → persistence IOC
-│   ├── wevtutil cl Security / System → log tampering (Sysmon Event 1)
-│   └── svchost.exe in %TEMP%\WindowsUpdate_* → masquerade IOC
-│
-├── Application-layer signals
-│   ├── Chrome with --headless=new + --disable-blink-features → CLI flags
-│   ├── Chrome launched with --use-fake-ui-for-media-stream → auto-grant IOC
-│   └── OpenCV QRCodeDetector library load in Python process → behavioural
-│
-└── Data-layer signals
-    ├── Large base64-encoded POSTs (screenshots) → DLP signature
-    ├── Repeated clipboard reads without user action → unusual
-    └── Webcam / screenshot access without user interaction → privacy violation
-```
+See **[docs/diagrams/attack-tree.md](../diagrams/attack-tree.md)** for the full attack tree diagram rendered as PlantUML.
+
+The tree is organized into four detection layers:
+
+| Layer | Signal Examples |
+|-------|-----------------|
+| **Network** | Repeated POST to `/exfil/*` (beaconing), HTTP to non-standard ports, headless Chrome traffic |
+| **Host (Windows)** | Registry Run keys, scheduled tasks, `wevtutil cl`, `svchost.exe` in `%TEMP%` |
+| **Application** | Chrome `--headless=new` + `--disable-blink-features`, `--use-fake-ui-for-media-stream`, OpenCV library loads |
+| **Data** | Large base64 POSTs, unusual clipboard reads, webcam access without user action |
+
+See the diagram for the full tree with IOC annotations on each leaf.
 
 ---
 
