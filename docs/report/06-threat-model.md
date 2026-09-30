@@ -140,7 +140,7 @@ By mapping to ATT&CK, defenders can build detections for each technique (e.g., S
 
 ## 6. Attack Tree (Defensive Detection Perspective)
 
-See **[docs/diagrams/attack-tree.md](../diagrams/attack-tree.md)** for the full attack tree diagram rendered as PlantUML.
+![Attack Tree](../diagrams/attack-tree.png)
 
 The tree is organized into four detection layers:
 
@@ -151,8 +151,7 @@ The tree is organized into four detection layers:
 | **Application** | Chrome `--headless=new` + `--disable-blink-features`, `--use-fake-ui-for-media-stream`, OpenCV library loads |
 | **Data** | Large base64 POSTs, unusual clipboard reads, webcam access without user action |
 
-See the diagram for the full tree with IOC annotations on each leaf.
-
+See **[docs/diagrams/attack-tree.md](../diagrams/attack-tree.md)** for the full-resolution diagram with IOC annotations.
 ---
 
 ## 7. Assumptions & Out-of-Scope
