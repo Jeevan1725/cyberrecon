@@ -1,78 +1,152 @@
-\# Use Case Diagram
+\# CyberRecon — Use Case Diagram
 
 
 
-```mermaid
+```plantuml
 
-graph TB
+@startuml
 
-&#x20;   subgraph Actors
+left to right direction
 
-&#x20;       OP\[👤 Operator]
+skinparam packageStyle rectangle
 
-&#x20;       DF\[🛡️ Defender]
+skinparam actorStyle awesome
 
-&#x20;       VM\[💻 Victim Host]
-
-&#x20;   end
+title CyberRecon - QR-C2 Framework - Use Case Diagram
 
 
 
-&#x20;   subgraph "CyberRecon System"
+actor "Operator" as OP
 
-&#x20;       UC1\[Register Victim]
+actor "Victim Host" as VH
 
-&#x20;       UC2\[Send Command]
+actor "Defender" as DF
 
-&#x20;       UC3\[Fetch QR Command]
-
-&#x20;       UC4\[Execute RAT Command]
-
-&#x20;       UC5\[Exfiltrate Data]
-
-&#x20;       UC6\[View Dashboard]
-
-&#x20;       UC7\[Download Exfil ZIP]
-
-&#x20;       UC8\[Authenticate Operator]
-
-&#x20;       UC9\[Parse NL Command]
-
-&#x20;   end
+actor "C2 Server" as C2
 
 
 
-&#x20;   OP --> UC1
+rectangle "CyberRecon - QR-Code-Based C2 Framework" {
 
-&#x20;   OP --> UC2
+&#x20;   usecase "Authenticate Operator" as UC1
 
-&#x20;   OP --> UC6
+&#x20;   usecase "Register Victim" as UC2
 
-&#x20;   OP --> UC7
+&#x20;   usecase "Send Command" as UC3
 
-&#x20;   OP --> UC8
+&#x20;   usecase "Queue Command" as UC4
 
-&#x20;   OP --> UC9
+&#x20;   usecase "Fetch QR Command" as UC5
+
+&#x20;   usecase "Decode QR Payload" as UC6
+
+&#x20;   usecase "Execute RAT Command" as UC7
+
+&#x20;   usecase "Exfiltrate Data" as UC8
+
+&#x20;   usecase "Store Exfil Data" as UC9
+
+&#x20;   usecase "View Dashboard" as UC10
+
+&#x20;   usecase "Download Exfil ZIP" as UC11
+
+&#x20;   usecase "Parse NL Command" as UC12
+
+&#x20;   usecase "Locate via GPS" as UC13
+
+&#x20;   usecase "Capture Screenshot" as UC14
+
+&#x20;   usecase "Monitor Keystrokes" as UC15
+
+}
 
 
 
-&#x20;   VM --> UC3
+' =========================
 
-&#x20;   VM --> UC4
+' Operator Relationships
 
-&#x20;   VM --> UC5
+' =========================
+
+OP --> UC1
+
+OP --> UC3
+
+OP --> UC10
+
+OP --> UC11
+
+OP --> UC12
 
 
 
-&#x20;   DF -.->|reads IOCs| UC9
+' =========================
+
+' Victim Host Relationships
+
+' =========================
+
+VH --> UC2
+
+VH --> UC5
+
+VH --> UC7
+
+VH --> UC8
 
 
 
-&#x20;   UC2 -.->|requires| UC8
+' =========================
 
-&#x20;   UC7 -.->|requires| UC8
+' C2 Server Relationships
 
-&#x20;   UC4 -.->|triggers| UC5
+' =========================
+
+C2 --> UC4
+
+C2 --> UC9
+
+
+
+' =========================
+
+' Defender Relationships
+
+' =========================
+
+DF --> UC12 : reads IOCs
+
+
+
+' =========================
+
+' Include Relationships
+
+' =========================
+
+UC3 ..> UC1 : <<include>>
+
+UC3 ..> UC4 : <<include>>
+
+UC5 ..> UC6 : <<include>>
+
+UC6 ..> UC7 : <<include>>
+
+UC7 ..> UC8 : <<include>>
+
+UC7 ..> UC13 : <<include>>
+
+UC7 ..> UC14 : <<include>>
+
+UC7 ..> UC15 : <<include>>
+
+UC8 ..> UC9 : <<include>>
+
+UC11 ..> UC1 : <<include>>
+
+
+
+@enduml
 
 ```
 
