@@ -44,7 +44,7 @@ flowchart LR
 
 &#x20;   STORE -->|renders| DASH\[Dashboard]
 
-&#x20;   STORE -->|ZIP| DL\[/download-all]
+&#x20;   STORE -->|ZIP| DL\[download-all]
 
 ```
 
