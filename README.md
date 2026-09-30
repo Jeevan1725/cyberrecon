@@ -153,6 +153,76 @@ Full report: [docs/report/08-security-testing.md](docs/report/08-security-testin
 - **[.github/workflows/cd.yml](.github/workflows/cd.yml)** — Builds a
   Docker image and creates a GitHub Release when a `v*` tag is pushed.
 
+
+
+## Docker Quick Start (Recommended)
+
+The entire C2 stack runs in a hardened container with a single command.
+
+### Prerequisites
+
+- Docker 20.10+ and Docker Compose v2
+
+### Run
+
+```bash
+# Set an operator token (required for auth-protected endpoints)
+export CYBERRECON_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_hex(24))')"
+echo "Token: $CYBERRECON_OPERATOR_TOKEN"
+
+# Build and start
+docker compose up --build -d
+
+# Verify healthcheck
+docker compose ps
+# → cyberrecon-c2  healthy
+
+# View logs
+docker compose logs -f c2-server
+```
+
+### Access
+
+| Endpoint | URL |
+|----------|-----|
+| Health check | http://localhost:8443/check |
+| Dashboard | http://localhost:8443/dashboard |
+| REST API | http://localhost:8443/ |
+
+### Stop
+
+```bash
+docker compose down
+```
+
+### Security Hardening Applied
+
+| Control | Value |
+|---------|-------|
+| Read-only root FS | ✅ `read_only: true` |
+| Linux capabilities | Dropped all (`cap_drop: ALL`) |
+| Privilege escalation | Blocked (`no-new-privileges`) |
+| User | Non-root (UID 1000) |
+| Memory limit | 1 GB |
+| CPU limit | 1.0 core |
+| Port binding | Localhost only (`127.0.0.1:8443`) |
+| Healthcheck | Every 30s |
+| Multi-stage build | Builder + runtime layers |
+
+### Enable LAN Access
+
+By default, the C2 port binds to `127.0.0.1` only. To accept connections
+from other hosts on the network (e.g., a victim VM), edit
+`docker-compose.yml` and change:
+
+```yaml
+ports:
+  - "127.0.0.1:8443:8443"   # localhost only (default)
+  # → "0.0.0.0:8443:8443"   # LAN-visible (lab only)
+```
+
+**⚠️ Warning:** Only expose on a network where all traffic is authorized.
+
 ## Threat Model
 
 See [docs/report/06-threat-model.md](docs/report/06-threat-model.md)
