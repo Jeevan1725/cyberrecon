@@ -1,66 +1,45 @@
-\# Deployment Diagram
+# CyberRecon — Deployment Diagram
 
+**Format:** PlantUML
 
+**Source file:** [deployment.puml](deployment.puml)
 
-```mermaid
+## Rendered Diagram
 
-graph TB
+![Deployment Diagram](deployment.png)
 
-&#x20;   subgraph "Attacker VM (Linux)"
+## PlantUML Source
 
-&#x20;       DOCKER\[Docker Host]
+```plantuml
+@startuml
+skinparam packageStyle rectangle
+title CyberRecon - Deployment Diagram
 
-&#x20;       C2\[C2 Server Container<br/>Port 8443<br/>Non-root user]
+node "Attacker VM (Linux)" as ATTACKER {
+    node "Docker Host" as DOCKER {
+        node "C2 Server Container\nPort 8443\nNon-root user" as C2
+        node "AWS Relay Container\nPort 443" as RELAY
+    }
+    RELAY ..> C2 : proxy
+}
 
-&#x20;       RELAY\[AWS Relay Container<br/>Port 443]
+node "Victim VM (Windows)" as VICTIM {
+    node "RAT Client\nPython 3.11+" as RATC
+    node "Headless Chrome\nSelenium" as CHROME
+    node "Webcam Device" as CAM
+    node "File System" as FS
+    RATC --> CHROME
+    RATC --> CAM
+    RATC --> FS
+}
 
+node "GitHub" as GH {
+    node "CI Workflow\nBandit+pip-audit+Ruff+pytest" as CI
+    node "CD Workflow\nDocker build+release" as CD
+}
 
+C2 --> CHROME : HTTPS QR PNG
+RATC --> C2 : HTTPS POST /exfil
 
-&#x20;       DOCKER --> C2
-
-&#x20;       DOCKER --> RELAY
-
-&#x20;       RELAY -.->|proxy| C2
-
-&#x20;   end
-
-
-
-&#x20;   subgraph "Victim VM (Windows)"
-
-&#x20;       RATC\[RAT Client<br/>Python 3.11+]
-
-&#x20;       CHROME\[Headless Chrome<br/>Selenium]
-
-&#x20;       CAM\[Webcam Device]
-
-&#x20;       FS\[File System]
-
-
-
-&#x20;       RATC --> CHROME
-
-&#x20;       RATC --> CAM
-
-&#x20;       RATC --> FS
-
-&#x20;   end
-
-
-
-&#x20;   C2 -->|HTTPS<br/>QR PNG| CHROME
-
-&#x20;   RATC -->|HTTPS<br/>POST /exfil| C2
-
-
-
-&#x20;   subgraph "GitHub"
-
-&#x20;       CI\[CI Workflow<br/>Bandit+pip-audit+Ruff+pytest]
-
-&#x20;       CD\[CD Workflow<br/>Docker build+release]
-
-&#x20;   end
-
+@enduml
 ```
-

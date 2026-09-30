@@ -1,66 +1,49 @@
-\# Sequence Diagram — Command Flow
+# CyberRecon — Sequence Diagram (Command Flow)
 
+**Format:** PlantUML
 
+**Source file:** [sequence-command.puml](sequence-command.puml)
 
-```mermaid
+## Rendered Diagram
 
-sequenceDiagram
+![Sequence Diagram](sequence-command.png)
 
-&#x20;   participant OP as Operator CLI
+## PlantUML Source
 
-&#x20;   participant C2 as C2 Server
+```plantuml
+@startuml
+skinparam packageStyle rectangle
+skinparam actorStyle awesome
+title CyberRecon - Sequence Diagram - Command Flow
 
-&#x20;   participant QC as QR Channel
+actor "Operator CLI" as OP
+participant "C2 Server" as C2
+participant "QR Channel" as QC
+participant "Victim Client" as VC
+participant "Command Handler" as H
+participant "Exfil Endpoint" as EX
 
-&#x20;   participant VC as Victim Client
+OP -> C2 : POST /command/<id>\nX-Operator-Token
+C2 -> C2 : Verify token
+C2 -> C2 : Queue command
+C2 --> OP : 200 queued
 
-&#x20;   participant H as Command Handler
+loop Poll every 5s
+    VC -> C2 : GET /qr/<id>
+    C2 -> QC : Encode command as QR PNG
+    QC --> VC : PNG image
+    VC -> VC : Selenium renders in Chrome
+    VC -> VC : OpenCV decodes QR
+end
 
-&#x20;   participant EX as Exfil Endpoint
+VC -> H : dispatch command
+H -> H : Execute (e.g., screenshot)
+H -> EX : POST /exfil/<id>\n{type, data}
+EX -> C2 : Store exfil data
+C2 --> EX : 200 received
 
+OP -> C2 : GET /exfil-data/<id>
+C2 --> OP : JSON payload
 
-
-&#x20;   OP->>C2: POST /command/<id><br/>X-Operator-Token
-
-&#x20;   C2->>C2: Verify token
-
-&#x20;   C2->>C2: Queue command
-
-&#x20;   C2-->>OP: 200 queued
-
-
-
-&#x20;   loop Poll every 5s
-
-&#x20;       VC->>C2: GET /qr/<id>
-
-&#x20;       C2->>QC: Encode command as QR PNG
-
-&#x20;       QC-->>VC: PNG image
-
-&#x20;       VC->>VC: Selenium renders in Chrome
-
-&#x20;       VC->>VC: OpenCV decodes QR
-
-&#x20;   end
-
-
-
-&#x20;   VC->>H: dispatch command
-
-&#x20;   H->>H: Execute (e.g., screenshot)
-
-&#x20;   H->>EX: POST /exfil/<id><br/>{type, data}
-
-&#x20;   EX->>C2: Store exfil data
-
-&#x20;   C2-->>EX: 200 received
-
-
-
-&#x20;   OP->>C2: GET /exfil-data/<id>
-
-&#x20;   C2-->>OP: JSON payload
-
+@enduml
 ```
-

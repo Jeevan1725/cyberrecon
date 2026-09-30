@@ -1,0 +1,31 @@
+@startuml
+skinparam packageStyle rectangle
+title CyberRecon - Deployment Diagram
+
+node "Attacker VM (Linux)" as ATTACKER {
+    node "Docker Host" as DOCKER {
+        node "C2 Server Container\nPort 8443\nNon-root user" as C2
+        node "AWS Relay Container\nPort 443" as RELAY
+    }
+    RELAY ..> C2 : proxy
+}
+
+node "Victim VM (Windows)" as VICTIM {
+    node "RAT Client\nPython 3.11+" as RATC
+    node "Headless Chrome\nSelenium" as CHROME
+    node "Webcam Device" as CAM
+    node "File System" as FS
+    RATC --> CHROME
+    RATC --> CAM
+    RATC --> FS
+}
+
+node "GitHub" as GH {
+    node "CI Workflow\nBandit+pip-audit+Ruff+pytest" as CI
+    node "CD Workflow\nDocker build+release" as CD
+}
+
+C2 --> CHROME : HTTPS QR PNG
+RATC --> C2 : HTTPS POST /exfil
+
+@enduml

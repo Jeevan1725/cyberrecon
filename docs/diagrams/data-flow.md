@@ -1,50 +1,58 @@
-\# Data Flow Diagram
+# CyberRecon — Data Flow Diagram
 
+**Format:** PlantUML
 
+**Source file:** [data-flow.puml](data-flow.puml)
 
-```mermaid
+## Rendered Diagram
 
-flowchart LR
+![Data Flow Diagram](data-flow.png)
 
-&#x20;   OP\[Operator] -->|command| C2\[C2 Server]
+## PlantUML Source
 
-&#x20;   C2 -->|JSON| B64\[base64 encoder]
+```plantuml
+@startuml
+skinparam packageStyle rectangle
+title CyberRecon - Data Flow Diagram
 
-&#x20;   B64 -->|payload| QR\[QR generator]
+[Operator] as OP
+[C2 Server] as C2
+[base64 encoder] as B64
+[QR generator] as QR
+[Victim Browser] as VICTIM
+[OpenCV decoder] as CV
+[Command dispatcher] as DISP
 
-&#x20;   QR -->|PNG| VICTIM\[Victim Browser]
+[Screenshot module] as SS
+[Keylogger module] as KL
+[GPS module] as GPS
+[Process module] as PR
 
-&#x20;   VICTIM -->|screenshot| CV\[OpenCV decoder]
+[POST /exfil] as EXFIL
+database "C2 Store" as STORE
+[Dashboard] as DASH
+[/download-all] as DL
 
-&#x20;   CV -->|JSON| DISP\[Command dispatcher]
+OP --> C2 : command
+C2 --> B64 : JSON
+B64 --> QR : payload
+QR --> VICTIM : PNG
+VICTIM --> CV : screenshot
+CV --> DISP : JSON
 
+DISP --> SS : screenshot
+DISP --> KL : keystrokes
+DISP --> GPS : gps
+DISP --> PR : processes
 
+SS --> EXFIL : base64
+KL --> EXFIL : base64
+GPS --> EXFIL : JSON
+PR --> EXFIL : JSON
 
-&#x20;   DISP -->|screenshot| SS\[Screenshot module]
+EXFIL --> STORE : stores
+STORE --> DASH : renders
+STORE --> DL : ZIP
 
-&#x20;   DISP -->|keystrokes| KL\[Keylogger module]
-
-&#x20;   DISP -->|gps| GPS\[GPS module]
-
-&#x20;   DISP -->|processes| PR\[Process module]
-
-
-
-&#x20;   SS -->|base64| EXFIL\[POST /exfil]
-
-&#x20;   KL -->|base64| EXFIL
-
-&#x20;   GPS -->|JSON| EXFIL
-
-&#x20;   PR -->|JSON| EXFIL
-
-
-
-&#x20;   EXFIL -->|stores| STORE\[(C2 Store)]
-
-&#x20;   STORE -->|renders| DASH\[Dashboard]
-
-&#x20;   STORE -->|ZIP| DL\[download-all]
-
+@enduml
 ```
-
