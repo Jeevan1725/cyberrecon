@@ -1,0 +1,59 @@
+@startuml
+skinparam monochrome true
+skinparam shadowing false
+skinparam componentStyle rectangle
+
+title CyberRecon — DFD Level 2 (Expand 5.0 "Execute RAT Modules")
+
+rectangle "5.0 Execute RAT Modules" {
+
+  usecase "5.1\nDispatch\nCommand" as P51
+  usecase "5.2\nSystem\nRecon" as P52
+  usecase "5.3\nCapture\nScreen / Cam" as P53
+  usecase "5.4\nKeystroke\nCapture" as P54
+  usecase "5.5\nClipboard\nAccess" as P55
+  usecase "5.6\nGPS\nLookup" as P56
+  usecase "5.7\nPersistence\n/ Cleanup" as P57
+}
+
+actor "Decoded Command\n(from 4.0)" as CMD <<external>>
+actor "To 6.0\nExfiltrate Data" as EXF <<external>>
+
+database "Keylogger\nBuffer" as KB
+
+' Dispatch
+CMD --> P51 : {cmd, args, id}
+
+' System recon
+P51 --> P52 : if cmd in [whoami, system_info,\nprocess_list, list_files, shell]
+P52 --> EXF : system_output
+
+' Capture
+P51 --> P53 : if cmd == screenshot\nor webcam_capture
+P53 --> EXF : PNG/JPEG\n(base64)
+
+' Keystrokes
+P51 --> P54 : if cmd == keylogger
+P54 --> KB : write_keystrokes
+KB --> P54 : read_buffer
+P54 --> EXF : keystroke_chunk\n(every 15s)
+
+' Clipboard
+P51 --> P55 : if cmd == clipboard_steal
+P55 --> EXF : clipboard_text
+
+' GPS
+P51 --> P56 : if cmd == gps_location
+P56 --> EXF : {lat, lon, source}
+
+' Persistence
+P51 --> P57 : if cmd == persist\nor self_destruct
+P57 --> EXF : ack_status
+
+note right of P51
+  Command blocklist:
+  shlex.split + shell=False
+  (CWE-78 mitigation)
+end note
+
+@enduml

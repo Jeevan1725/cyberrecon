@@ -101,6 +101,40 @@ Operator → C2 Server → base64 encoder → QR generator → Victim Browser
 
 **See:** [data-flow.md](data-flow.md)
 
+## 📊 Leveled Data Flow Diagrams
+
+Adds a complete leveled DFD set per DeMarco / Gane-Sarson convention:
+
+| Level | Purpose | Contents |
+|-------|---------|----------|
+| **0** — Context | System boundary | CyberRecon as single process + 4 external entities |
+| **1** — Top-level | Major functional decomposition | 7 processes + 2 data stores |
+| **2** — Detail | Expand Process 5.0 | 7 sub-processes + keystroke buffer |
+
+### Why leveled DFDs
+
+Single-level DFDs are insufficient for academic evaluation. Leveled DFDs demonstrate:
+- **Scope definition** (Level 0)
+- **Functional decomposition** (Level 1)
+- **Internal process logic** (Level 2)
+- Structured analysis ability
+
+### Deliverables
+
+For each level:
+- `.puml` — PlantUML source
+- `.md` — Markdown wrapper with reading guide, tables of processes/flows/stores
+- `.png` — Rendered image for inline GitHub display
+
+Plus updated `docs/diagrams/README.md` index.
+
+### Testing
+
+- [x] All 3 `.puml` files parse on plantuml.com
+- [x] All 3 `.png` renders saved
+- [x] All 3 `.md` wrappers reference the correct PNG
+- [x] Diagram index updated
+
 ---
 
 ### 6. Attack Tree

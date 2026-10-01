@@ -1,0 +1,43 @@
+@startuml
+skinparam monochrome true
+skinparam shadowing false
+skinparam rectangle {
+  BackgroundColor White
+  BorderColor Black
+}
+skinparam componentStyle rectangle
+
+title CyberRecon — DFD Level 0 (Context Diagram)
+
+' External entities
+rectangle "Operator\n(Authorized Researcher)" as OP <<external>>
+rectangle "Victim Host\n(Compromised Windows VM)" as VH <<external>>
+rectangle "Google Chrome\n(headless browser)" as CH <<external>>
+rectangle "Defender\n(Blue team / IOC consumer)" as DF <<external>>
+
+' Single system process
+rectangle "0\nCyberRecon C2 Framework" as SYSTEM {
+  rectangle "QR-Code-Based\nC2 System" as CORE #line:black;line.dashed
+}
+
+' Data flows
+OP --> SYSTEM : operator_token\nqueued_commands\nquery_requests
+SYSTEM --> OP : command_status\nvictim_list\nexfil_data\nZIP_archive
+
+VH --> SYSTEM : victim_registration\n(auth via HTTP POST /register)
+SYSTEM --> VH : QR_PNG (command or heartbeat)
+VH --> SYSTEM : exfil_payload\n(screenshot, keystrokes, GPS, webcam)
+
+CH --> SYSTEM : GET /qr/<victim_id>\n(render QR image)
+SYSTEM --> CH : QR_PNG
+
+DF -.-> SYSTEM : reads published\nIOCs (ETHICS.md)
+
+note right of SYSTEM
+  Out of scope:
+  - Victim OS exploitation
+  - Browser isolation internals
+  - AWS infrastructure
+end note
+
+@enduml
