@@ -12,7 +12,7 @@
 
 Reproduction & defensive study of Mandiant's 2024 QR-C2 browser-isolation bypass.
 
-**Status:** Demo-ready · 23 merged PRs · 6 CWEs remediated · SAST clean · v3.5 hardened.
+**Status:** Demo-ready · 100+ commits · 10 CWEs remediated · SAST clean · v3.5 hardened.
 
 ---
 
@@ -40,10 +40,10 @@ Unlike Mandiant's 2024 proof-of-concept (which requires the paid Cobalt Strike f
 | **Throughput** | 400–500 bytes/sec (Mandiant baseline: ~438) |
 | **QR decode latency** | ~650ms (Mandiant baseline: ~5s per frame) |
 | **RAT features** | 12 (screenshot, webcam, keylogger, clipboard, GPS, process list, system info, file ops, persistence, self-destruct, shell, list files) |
-| **Security patches** | 6 CWEs fixed (306, 295, 78, 22, 330, 798) + 5 hardening layers (v3.5) |
+| **Security patches** | 6 CWEs fixed (306, 295, 78, 22, 330, 798) + 4 CWEs (311, 384, 613, 539) + 5 hardening layers (v3.5) |
 | **SAST findings** | 0 HIGH, 0 CVEs, 0 Semgrep, 0 Ruff |
-| **External dependencies** | 11 (down from 20+) |
-| **Merged PRs** | 23 |
+| **Runtime dependencies** | 13 (down from 20+) |
+| **Merged PRs** | 27 |
 
 ---
 
@@ -91,7 +91,7 @@ Full diagrams: [`docs/diagrams/`](docs/diagrams/) — use case, sequence, archit
 
 - Selenium + headless Chrome QR fetch (faithful to Mandiant technique)
 - OpenCV QR decode
-- 12 feature modules (see `modules/`)
+- 12 features (inlined in `rat_client.py`)
 - Graceful fallback to `requests.get` if Chrome unavailable
 - Camera/microphone permission auto-grant for isolated-browser environments
 - **Filesystem sandbox** (`CYBERRECON_SANDBOX`) for all file operations
@@ -351,13 +351,6 @@ cyberrecon/
 ├── main.py                  # Unified launcher
 ├── config.py                # Global configuration
 ├── ai_agent.py              # NL command parser
-├── modules/                 # RAT feature modules
-│   ├── keylogger.py
-│   ├── screenshot.py
-│   ├── webcam.py
-│   ├── gps.py
-│   ├── stealth.py
-│   └── persistence.py
 ├── tests/                   # Pytest suite
 ├── docs/
 │   ├── report/              # 7 documents + evidence (v3.5 changelog added)
@@ -368,7 +361,7 @@ cyberrecon/
 ├── docker-compose.yml       # Hardened Compose definition
 ├── bandit.yaml              # Bandit SAST rules
 ├── pyproject.toml           # Ruff + pytest config
-├── requirements.txt         # 11 runtime deps
+├── requirements.txt         # 13 runtime deps
 └── requirements-dev.txt     # + pytest, bandit, pip-audit, pyinstaller, ruff
 ```
 
@@ -383,7 +376,7 @@ cyberrecon/
 | [docs/report/06-threat-model.md](docs/report/06-threat-model.md) | STRIDE analysis + MITRE ATT&CK mapping |
 | [docs/report/07-security-features.md](docs/report/07-security-features.md) | Security controls + remediated anti-patterns |
 | [docs/report/08-security-testing.md](docs/report/08-security-testing.md) | Bandit, Semgrep, pip-audit, Ruff results |
-| [docs/report/09-dependency-analysis.md](docs/report/09-dependency-analysis.md) | Module fan-in/fan-out + reduction (20+ → 11) |
+| [docs/report/09-dependency-analysis.md](docs/report/09-dependency-analysis.md) | Module fan-in/fan-out + reduction (20+ → 13) |
 | [docs/report/10-hardening-changelog.md](docs/report/10-hardening-changelog.md) | v3.5 hardening changes + residual artifacts |
 | [docs/diagrams/](docs/diagrams/) | PlantUML diagrams (rendered PNGs) |
 | [ETHICS.md](ETHICS.md) | Ethical terms + published IOCs for defenders |
