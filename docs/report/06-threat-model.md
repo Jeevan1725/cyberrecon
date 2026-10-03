@@ -6,6 +6,14 @@
 **Methodology:** STRIDE + MITRE ATT&CK + Attack Trees
 
 ---
+> **Update (v3.5) — 2026-10-03:** Five additional security controls were added on top of the v3.0 baseline. See [`10-hardening-changelog.md`](10-hardening-changelog.md) for the full catalog and threat mapping.
+>
+> **New controls (v3.5):**
+> 1. **AES-256-GCM QR payload encryption** — commands encrypted before QR encoding (CWE-311 mitigation)
+> 2. **Victim shared-key authentication** — `X-Victim-Key` header or `?vkey=` query on all victim-side routes
+> 3. **Dashboard session login** — `require_dashboard_login` gate on read-only APIs and dashboard HTML; `HttpOnly` + `Secure` + `SameSite=Lax` cookies (CWE-384, 613, 539 mitigation)
+> 4. **Server-side wipe endpoint** — `/self_destruct_notify/<id>` purges victim record on self-destruct
+> 5. **Anti-forensic self-destruct** — userland cleanup of registry, temp, Chrome profiles, sandbox, and payload binary (see `self-destruct-sequence.puml`)
 
 ## 1. Purpose & Scope
 
