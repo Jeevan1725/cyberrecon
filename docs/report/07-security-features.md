@@ -5,7 +5,7 @@
 **Date:** 2026-10-03
 **Authors:** Vekeshhari Rajasekar, R Jeevan
 
-> **Update (v3.5) — 2026-10-03:** This document was revised for the v3.5 hardening pass. Five new controls (AES-256-GCM encryption, victim shared-key auth, dashboard session login, server-side wipe, anti-forensic self-destruct) bring the total control count from 43 to 48. New anti-patterns (CWE-311, 384, 613, 539) added with remediation. See [`10-hardening-changelog.md`](10-hardening-changelog.md) for the full delta.
+> **Update (v3.5) — 2026-10-03:** This document was revised for the v3.5 hardening pass. Five new controls (AES-256-GCM encryption, victim shared-key auth, dashboard session login, server-side wipe, anti-forensic self-destruct) bring the total control count from 43 to 67. New anti-patterns (CWE-311, 384, 613, 539) added with remediation. See [`10-hardening-changelog.md`](10-hardening-changelog.md) for the full delta.
 
 ---
 
@@ -42,7 +42,7 @@ The goal is twofold: demonstrate the project was engineered with security in min
 | 12 | **Configurable CA bundle** — supports lab CAs via `CYBERRECON_CA_BUNDLE` | `operator_cli.py` | Lab flexibility | ✅ PR #9 |
 | 13 | **Self-signed TLS support** — opt-in via `CYBERRECON_ALLOW_SELFSIGNED=true` | `c2_server.py`, `rat_client.py` | Lab deployment | ✅ v3.5 |
 | 14 | **HTTPS by default** — server auto-detects `cert.pem` + `key.pem` | `c2_server.py` | Sniffing | ✅ v3.5 |
-| 15 | **Chrome CDP TLS bypass only when opted in** — `--ignore-certificate-errors` gated by env var | `rat_client.py` | Selenium to self-signed | ✅ v3.5 |
+| 15 | **Chrome CDP TLS bypass only when opted in** | `rat_client.py` | Selenium to self-signed | ✅ v3.5 |
 
 ### 2.3 Cryptography
 
@@ -77,7 +77,7 @@ The goal is twofold: demonstrate the project was engineered with security in min
 | 32 | **7-day cooldown** | `.github/dependabot.yml` | Supply chain attacks | ✅ Phase 3 |
 | 33 | **Secret scanning + push protection** | GitHub settings | Credential leakage | ✅ |
 | 34 | **Reduced dependency footprint** — 20+ → 13 | `requirements.txt` | Attack surface | ✅ |
-| 35 | **`.gitignore` covers secrets** — `.env`, `cert.pem`, `key.pem`, `victims_state.json` | `.gitignore` | CWE-798 | ✅ v3.5 |
+| 35 | **`.gitignore` covers secrets** | `.gitignore` | CWE-798 | ✅ v3.5 |
 
 ### 2.6 Client Hardening
 
@@ -87,8 +87,8 @@ The goal is twofold: demonstrate the project was engineered with security in min
 | 37 | **Headless Chrome stealth flags** | `rat_client.py` | Bot-detection evasion | ✅ PR #14 |
 | 38 | **Auto-grant media permissions** | `rat_client.py` | Isolated-browser bypass | ✅ PR #14 |
 | 39 | **Embedded config** — `EMBEDDED_CONFIG` dict for PyInstaller builds | `rat_client.py` | Offline operation | ✅ v3.5 |
-| 40 | **Auto-register on double-click** — `.exe` with no args auto-registers | `rat_client.py` | Usability | ✅ v3.5 |
-| 41 | **ACK after execution** — client confirms command done via `/ack` | `rat_client.py` | Reliable queue | ✅ v3.5 |
+| 40 | **Auto-register on double-click** | `rat_client.py` | Usability | ✅ v3.5 |
+| 41 | **ACK after execution** | `rat_client.py` | Reliable queue | ✅ v3.5 |
 
 ### 2.7 Anti-Forensic Self-Destruct
 
@@ -117,7 +117,7 @@ The goal is twofold: demonstrate the project was engineered with security in min
 | # | Feature | File | Purpose | Status |
 |---|---------|------|---------|--------|
 | 54 | **Branch protection ruleset** | GitHub rulesets | Prevent accidental changes | ✅ |
-| 55 | **Required status checks** — Security Scan + Unit Tests | GitHub rulesets | CI enforcement | ✅ Phase 4 |
+| 55 | **Required status checks** | GitHub rulesets | CI enforcement | ✅ Phase 4 |
 | 56 | **Block force pushes + deletions** | GitHub rulesets | History preservation | ✅ |
 | 57 | **Bypass audit trail** | GitHub push output | Accountability | ✅ |
 
@@ -170,7 +170,7 @@ def queue_command(victim_id):
 
 **Impact:** Without auth, anyone with network access could queue RAT commands. **CVSS: 8.6 (High).**
 
-**v3.5 addition:** `/dashboard`, `/victims`, `/victim/<id>`, `/exfil-data/<id>`, `/latest_screenshot/<id>`, `/latest_webcam/<id>` now require session login. Previously these leaked victim metadata to any anonymous caller.
+**v3.5 addition:** `/dashboard`, `/victims`, `/victim/<id>`, `/exfil-data/<id>`, `/latest_screenshot/<id>`, `/latest_webcam/<id>` now require session login.
 
 ### 3.2 CWE-295: Improper Certificate Validation
 

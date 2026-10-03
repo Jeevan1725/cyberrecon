@@ -13,8 +13,8 @@
 
 This document models threats against CyberRecon from two perspectives:
 
-1. **As a system under test** — what could go wrong within the framework itself (vulnerabilities we need to fix)
-2. **As a defensive exercise** — what signals would defenders see if CyberRecon were deployed maliciously (detection engineering)
+1. **As a system under test** — what could go wrong within the framework itself
+2. **As a defensive exercise** — what signals would defenders see if CyberRecon were deployed maliciously
 
 The purpose is dual: harden the framework against misuse or compromise, and publish IOCs to aid defenders.
 
@@ -105,7 +105,7 @@ Plus a secondary boundary:
 
 | Threat | Target | Likelihood | Impact | Mitigation |
 |--------|--------|------------|--------|------------|
-| Victim IDs enumerated via `/victim/<id>` | C2 API | Low | Medium | **v3.5:** 128-bit CSPRNG IDs (`secrets.token_hex(16)`) + login required |
+| Victim IDs enumerated via `/victim/<id>` | C2 API | Low | Medium | **v3.5:** 128-bit CSPRNG IDs + login required |
 | Passive QR interception reveals plaintext commands | QR channel | High (before v3.5) | High | **v3.5 fixed:** AES-256-GCM encryption |
 | Screenshot/keystroke data intercepted on C2 | Server | Low | High | Future: encrypt at rest |
 | Token leaked via process listing | C2 server | Low | High | Token from env var; not in command line |
@@ -162,7 +162,7 @@ Plus a secondary boundary:
 
 ### 5.2 Defensive Value
 
-By mapping to ATT&CK, defenders can build detections for each technique (e.g., Sysmon Event ID 1 for Chrome spawn), correlate CyberRecon IOCs with existing threat intel, and test their SOC's coverage.
+By mapping to ATT&CK, defenders can build detections for each technique, correlate CyberRecon IOCs with existing threat intel, and test their SOC's coverage.
 
 ### 5.3 v3.5 Detection Additions
 
@@ -246,7 +246,7 @@ See **[docs/diagrams/attack-tree.md](../diagrams/attack-tree.md)** for the full-
 - Hunt for `_cr_selfdestruct.bat` / `_cyberrecon*` in `%TEMP%`
 - Watch for detached `cmd.exe` spawned by `python.exe` or a PyInstaller binary
 - Detect `wevtutil cl` invocations (log clearing)
-- Flag payload binaries that disappear within 5s of execution (Sysmon Event 1 + file delete telemetry)
+- Flag payload binaries that disappear within 5s of execution
 - Monitor `%USERPROFILE%\CyberReconSandbox` writes
 
 ### 9.4 Application

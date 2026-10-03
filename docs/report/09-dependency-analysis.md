@@ -5,7 +5,7 @@
 **Date:** 2026-10-03
 **Authors:** Vekeshhari Rajasekar, R Jeevan
 
-> **Update (v3.5) — 2026-10-03:** Two runtime dependencies added (`cryptography>=42.0` for AES-256-GCM, `python-dotenv>=1.0` for env loading). The `modules/` folder was removed and all handlers inlined into `rat_client.py`, reducing Python file count from 15 to 9. Runtime dependency count is now **13**. This document was rewritten to reflect the current state.
+> **Update (v3.5) — 2026-10-03:** Two runtime dependencies added (`cryptography>=42.0` for AES-256-GCM, `python-dotenv>=1.0` for env loading). The `modules/` folder was removed and all handlers inlined into `rat_client.py`, reducing Python file count from 15 to 9. Runtime dependency count is now **13**.
 
 ---
 
@@ -103,7 +103,6 @@ class QRDecoder:            # main orchestrator
     def decode_qr_image(self): ...
     def execute_command(self): ...
     def _handle_whoami(self): ...
-    def _handle_screenshot(self): ...
     # ... 12 handlers total
 ```
 
@@ -140,7 +139,7 @@ rat_client/
 | # | Package | Version | Purpose | Category |
 |---|---------|---------|---------|----------|
 | 1 | `flask` | ≥2.3.0 | C2 HTTP server + dashboard | Server |
-| 2 | `requests` | ≥2.34.2 | HTTP client | HTTP |
+| 2 | `requests` | ≥2.31.0 | HTTP client | HTTP |
 | 3 | `pillow` | ≥12.3.0 | Image encoding/decoding | Image |
 | 4 | `qrcode[pil]` | ≥8.2 | QR PNG generation | QR |
 | 5 | `opencv-python` | ≥4.8.0 | QR decode + webcam | QR / Video |
@@ -183,7 +182,6 @@ The pre-refactor project pulled in: flask, flask-socketio, python-socketio, even
 | `geocoder` | Direct `urllib` to ip-api.com | ~3 MB |
 | `boto3` | AWS relay uses plain sockets | ~50 MB |
 | `urllib3` | Transitive via `requests` | n/a |
-| `dependabot` runtime helper | Not a runtime dep | n/a |
 
 **Net reduction: ~75 MB of install footprint.**
 
@@ -196,7 +194,7 @@ Two dependencies came back for security reasons:
 | `cryptography` | AES-256-GCM authenticated encryption | ~25 MB |
 | `python-dotenv` | Load `.env` for all 5 secrets | <1 MB |
 
-**Net v3.5: 13 runtime deps.** Still ~33% below the original 20+ count.
+**Net v3.5: 13 runtime deps.** Still ~35% below the original 20+ count.
 
 ### 4.4 Why We Kept Selenium
 
