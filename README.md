@@ -98,6 +98,13 @@ Full diagrams: [`docs/diagrams/`](docs/diagrams/) — use case, sequence, archit
 - **Anti-forensic self-destruct** — wipes registry, temp, RunMRU, RecentDocs, sandbox, and payload itself
 - **Embedded config** — single-file `.exe` build with no external `.env`
 
+### Operator CLI
+
+- Password login → session cookie
+- Operator token on command-issuing endpoints
+- Interactive shell: `victims`, `select <id>`, `<command>`, `info`, `help`, `exit`
+- TLS verification with optional CA bundle for self-signed lab certs
+
 ### Multi-Layer Fallback
 
 TCP → HTTP → QR (visual channel is the reliable path).
@@ -266,8 +273,9 @@ export CYBERRECON_DASHBOARD_PASSWORD="demo-dashboard-pass"
 export CYBERRECON_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 python c2_server.py
 
-# Terminal 2 — Operator CLI
-python operator_cli.py --c2 https://127.0.0.1:8443 --token demo-token-12345
+# Terminal 2 — Operator CLI (prompts for password)
+export CYBERRECON_OPERATOR_TOKEN="demo-token-12345"
+python operator_cli.py --c2 https://127.0.0.1:8443
 
 # Terminal 3 — Victim client (in isolated lab VM)
 export CYBERRECON_C2="https://<SERVER_LAN_IP>:8443"
@@ -346,19 +354,19 @@ Copy `.env.example` to `.env` and edit.
 cyberrecon/
 ├── c2_server.py             # Flask C2 + QR encoder + dashboard + login
 ├── rat_client.py            # Victim client (12 features + anti-forensics)
-├── operator_cli.py          # Operator console
+├── operator_cli.py          # Operator console (session login + token)
 ├── aws_relay.py             # Optional traffic relay
 ├── main.py                  # Unified launcher
 ├── config.py                # Global configuration
 ├── ai_agent.py              # NL command parser
 ├── tests/                   # Pytest suite
 ├── docs/
-│   ├── report/              # 7 documents + evidence (v3.5 changelog added)
-│   ├── diagrams/            # 7 PlantUML diagrams (self-destruct sequence added)
+│   ├── report/              # 8 documents + evidence (v3.5 changelog added)
+│   ├── diagrams/            # 9 PlantUML diagrams (self-destruct sequence + trust boundaries)
 │   └── adr/                 # Architecture Decision Records
-├── reports/                 # SAST evidence artifacts
+├── reports/                 # v3.0 SAST evidence + README note
 ├── Dockerfile               # Multi-stage hardened build
-├── docker-compose.yml       # Hardened Compose definition
+├── docker-compose.yml       # Hardened Compose (fail-closed on missing secrets)
 ├── bandit.yaml              # Bandit SAST rules
 ├── pyproject.toml           # Ruff + pytest config
 ├── requirements.txt         # 13 runtime deps
@@ -375,10 +383,10 @@ cyberrecon/
 | [docs/report/04-architecture.md](docs/report/04-architecture.md) | Component architecture + data flow |
 | [docs/report/06-threat-model.md](docs/report/06-threat-model.md) | STRIDE analysis + MITRE ATT&CK mapping |
 | [docs/report/07-security-features.md](docs/report/07-security-features.md) | Security controls + remediated anti-patterns |
-| [docs/report/08-security-testing.md](docs/report/08-security-testing.md) | Bandit, Semgrep, pip-audit, Ruff results |
+| [docs/report/08-security-testing.md](docs/report/08-security-testing.md) | Bandit, Semgrep, pip-audit, Ruff results (v3.5 addendum included) |
 | [docs/report/09-dependency-analysis.md](docs/report/09-dependency-analysis.md) | Module fan-in/fan-out + reduction (20+ → 13) |
 | [docs/report/10-hardening-changelog.md](docs/report/10-hardening-changelog.md) | v3.5 hardening changes + residual artifacts |
-| [docs/diagrams/](docs/diagrams/) | PlantUML diagrams (rendered PNGs) |
+| [docs/diagrams/](docs/diagrams/) | 9 PlantUML diagrams (rendered PNGs + trust boundaries) |
 | [ETHICS.md](ETHICS.md) | Ethical terms + published IOCs for defenders |
 
 ---
@@ -417,10 +425,10 @@ cyberrecon/
 
 | Tool | Before | After (v3.0) | After (v3.5) |
 |------|--------|--------------|--------------|
-| Bandit | 25 (4 HIGH) | 17 (0 HIGH) | Re-run in CI |
-| Semgrep | 5 | 0 | Re-run in CI |
+| Bandit | 25 (4 HIGH) | 17 (0 HIGH) | 0 HIGH (CI green) |
+| Semgrep | 5 | 0 | 0 (CI green) |
 | pip-audit | 0 CVEs | 0 CVEs | 0 CVEs |
-| Ruff | 131 | 0 | Re-run in CI |
+| Ruff | 131 | 0 | 0 (CI green) |
 
 Full evidence: [docs/report/08-security-testing.md](docs/report/08-security-testing.md)
 
