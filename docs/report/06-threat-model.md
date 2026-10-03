@@ -6,14 +6,21 @@
 **Methodology:** STRIDE + MITRE ATT&CK + Attack Trees
 
 ---
-> **Update (v3.5) — 2026-10-03:** Five additional security controls were added on top of the v3.0 baseline. See [`10-hardening-changelog.md`](10-hardening-changelog.md) for the full catalog and threat mapping.
+> **Update (v3.5) — 2026-10-03:** New attacker-side and defender-side considerations added:
 >
-> **New controls (v3.5):**
-> 1. **AES-256-GCM QR payload encryption** — commands encrypted before QR encoding (CWE-311 mitigation)
-> 2. **Victim shared-key authentication** — `X-Victim-Key` header or `?vkey=` query on all victim-side routes
-> 3. **Dashboard session login** — `require_dashboard_login` gate on read-only APIs and dashboard HTML; `HttpOnly` + `Secure` + `SameSite=Lax` cookies (CWE-384, 613, 539 mitigation)
-> 4. **Server-side wipe endpoint** — `/self_destruct_notify/<id>` purges victim record on self-destruct
-> 5. **Anti-forensic self-destruct** — userland cleanup of registry, temp, Chrome profiles, sandbox, and payload binary (see `self-destruct-sequence.puml`)
+> **New detection signatures (defender side):**
+> - Repeated failed `POST /login` (brute force on dashboard password)
+> - `X-Victim-Key` values observed on requests to `/register`, `/exfil/*`, `/qr/*` that don't match any active victim ID
+> - Detached `cmd.exe` spawning `.bat` files under `%TEMP%` (`_cr_selfdestruct.bat`, `_cr_cleanup.bat`)
+> - Registry reads/writes to `HKCU\Software\CyberRecon` and `HKCU\...\Run\WindowsSecurityUpdate`
+> - Sandbox writes under `%USERPROFILE%\CyberReconSandbox`
+>
+> **New attacker-side capabilities:**
+> - QR payloads are now AES-256-GCM encrypted — passive network capture of the QR image yields ciphertext only
+> - Victim session auth uses a shared key + operator token + session cookie (three-layer defense)
+> - Self-destruct performs userland anti-forensics and purges server-side victim record
+>
+> See [`10-hardening-changelog.md`](10-hardening-changelog.md) for the full list.
 
 ## 1. Purpose & Scope
 
