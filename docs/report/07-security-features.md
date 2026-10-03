@@ -1,20 +1,13 @@
 # 07 — Security Features & Anti-Patterns
 
 **Project:** CyberRecon — QR-Code-Based C2 Framework
-**Document Version:** 1.0
-**Date:** 2026-09-30
+**Document Version:** 2.0 (v3.5)
+**Date:** 2026-10-03
 **Authors:** Vekeshhari Rajasekar, R Jeevan
 
+> **Update (v3.5) — 2026-10-03:** This document was revised for the v3.5 hardening pass. Five new controls (AES-256-GCM encryption, victim shared-key auth, dashboard session login, server-side wipe, anti-forensic self-destruct) bring the total control count from 43 to 48. New anti-patterns (CWE-311, 384, 613, 539) added with remediation. See [`10-hardening-changelog.md`](10-hardening-changelog.md) for the full delta.
+
 ---
-> **Update (v3.5) — 2026-10-03:** Five additional security controls were added on top of the v3.0 baseline. See [`10-hardening-changelog.md`](10-hardening-changelog.md) for the full catalog and threat mapping.
->
-> **New controls (v3.5):**
-> 1. **AES-256-GCM QR payload encryption** — commands encrypted before QR encoding (CWE-311 mitigation)
-> 2. **Victim shared-key authentication** — `X-Victim-Key` header or `?vkey=` query on all victim-side routes
-> 3. **Dashboard session login** — `require_dashboard_login` gate on read-only APIs and dashboard HTML; `HttpOnly` + `Secure` + `SameSite=Lax` cookies (CWE-384, 613, 539 mitigation)
-> 4. **Server-side wipe endpoint** — `/self_destruct_notify/<id>` purges victim record on self-destruct
-> 5. **Anti-forensic self-destruct** — userland cleanup of registry, temp, Chrome profiles, sandbox, and payload binary (see `self-destruct-sequence.puml`)
-----
 
 ## 1. Purpose
 
@@ -30,94 +23,125 @@ The goal is twofold: demonstrate the project was engineered with security in min
 
 | # | Feature | File | Threat Addressed | Status |
 |---|---------|------|------------------|--------|
-| 1 | **Operator token authentication** — `X-Operator-Token` header required for `/command` and `/download-all` | `c2_server.py` | CWE-306 | ✅ PR #8 |
+| 1 | **Operator token authentication** — `X-Operator-Token` header required for `/command`, `/shell`, `/download-all` | `c2_server.py` | CWE-306 | ✅ PR #8 |
 | 2 | **Fail-closed on misconfiguration** — server returns HTTP 503 if token required but not set | `c2_server.py` | Fail-safe default | ✅ PR #8 |
-| 3 | **Environment-driven secrets** — operator token, CA bundle, SFX password from env vars | `config.py`, `.env.example` | CWE-798 | ✅ PR #13 |
+| 3 | **Environment-driven secrets** — all tokens from env vars | `config.py`, `.env.example` | CWE-798 | ✅ PR #13 |
+| 4 | **Dashboard login** — password gate on `/login` sets `HttpOnly`+`Secure`+`SameSite=Lax` session cookie | `c2_server.py` | CWE-306, 384 | ✅ v3.5 |
+| 5 | **Dashboard auth decorator** — `@require_dashboard_login` on all read-only APIs + HTML | `c2_server.py` | CWE-306 | ✅ v3.5 |
+| 6 | **Victim shared-key auth** — `X-Victim-Key` header or `?vkey=` query on all victim-side routes | `c2_server.py` | CWE-306 | ✅ v3.5 |
+| 7 | **Constant-time secret compare** — `secrets.compare_digest` for all token checks | `c2_server.py` | Timing attacks | ✅ v3.5 |
+| 8 | **Session fixation prevention** — `session.clear()` before setting `logged_in = True` | `c2_server.py` | CWE-384 | ✅ v3.5 |
+| 9 | **Configurable session lifetime** — `PERMANENT_SESSION_LIFETIME` from `CYBERRECON_SESSION_HOURS` | `c2_server.py` | CWE-613 | ✅ v3.5 |
+| 10 | **Layered operator auth** — session cookie **and** operator token required on command endpoints | `c2_server.py` | Defense-in-depth | ✅ v3.5 |
 
 ### 2.2 Transport Security
 
 | # | Feature | File | Threat Addressed | Status |
 |---|---------|------|------------------|--------|
-| 4 | **TLS verification enforced by default** — `session.verify = True` | `operator_cli.py` | CWE-295 | ✅ PR #9 |
-| 5 | **Configurable CA bundle** — supports lab CAs via `CYBERRECON_CA_BUNDLE` | `operator_cli.py` | Lab flexibility | ✅ PR #9 |
-| 6 | **Removed `urllib3.disable_warnings()`** — no silent TLS bypass | `operator_cli.py` | CWE-295 | ✅ PR #9 |
+| 11 | **TLS verification enforced by default** — `session.verify = True` | `operator_cli.py` | CWE-295 | ✅ PR #9 |
+| 12 | **Configurable CA bundle** — supports lab CAs via `CYBERRECON_CA_BUNDLE` | `operator_cli.py` | Lab flexibility | ✅ PR #9 |
+| 13 | **Self-signed TLS support** — opt-in via `CYBERRECON_ALLOW_SELFSIGNED=true` | `c2_server.py`, `rat_client.py` | Lab deployment | ✅ v3.5 |
+| 14 | **HTTPS by default** — server auto-detects `cert.pem` + `key.pem` | `c2_server.py` | Sniffing | ✅ v3.5 |
+| 15 | **Chrome CDP TLS bypass only when opted in** — `--ignore-certificate-errors` gated by env var | `rat_client.py` | Selenium to self-signed | ✅ v3.5 |
 
-### 2.3 Input Validation & Safe Execution
-
-| # | Feature | File | Threat Addressed | Status |
-|---|---------|------|------------------|--------|
-| 7 | **`shell=False` subprocess** — all commands use argv lists | `main.py`, `rat_client.py` | CWE-78 | ✅ PR #10 |
-| 8 | **Shell metacharacter blocklist** — rejects `\|&;<>()\`$\\"'\n\r` | `rat_client.py` | Defense-in-depth | ✅ PR #10 |
-| 9 | **Path traversal validation** — `os.path.realpath` comparison | `launcher.py` | CWE-22 | ✅ PR #11 |
-| 10 | **Extension whitelist** — only `.pdf` files allowed through `os.startfile` | `launcher.py` | File-type restriction | ✅ PR #11 |
-| 11 | **HTTPS-only URL scheme** — `urlopen` rejects non-HTTPS schemes | `modules/gps.py` | CWE-22 | ✅ Phase 3 |
-
-### 2.4 Cryptographic Randomness
+### 2.3 Cryptography
 
 | # | Feature | File | Threat Addressed | Status |
 |---|---------|------|------------------|--------|
-| 12 | **CSPRNG victim IDs** — `secrets.token_hex(8)` = 64 bits | `c2_server.py` | CWE-330 | ✅ PR #12 |
-| 13 | **CSPRNG command IDs** — `secrets.token_hex(4)` = 32 bits | `c2_server.py` | CWE-330 | ✅ PR #12 |
-| 14 | **CSPRNG SFX password** — `secrets.token_urlsafe(24)` fallback | `config.py` | CWE-330 | ✅ Phase 3 |
+| 16 | **AES-256-GCM QR payload encryption** — commands encrypted before QR encoding; per-message nonce | `c2_server.py`, `rat_client.py` | CWE-311 | ✅ v3.5 |
+| 17 | **CSPRNG victim IDs** — `secrets.token_hex(16)` = 128 bits | `c2_server.py` | CWE-330 | ✅ v3.5 |
+| 18 | **CSPRNG command IDs** — `secrets.token_hex(8)` = 64 bits | `c2_server.py` | CWE-330 | ✅ v3.5 |
+| 19 | **CSPRNG AES nonce** — 12 bytes per message | `c2_server.py` | Nonce reuse | ✅ v3.5 |
+| 20 | **CSPRNG Flask secret** — fallback `secrets.token_urlsafe(48)` if env missing | `c2_server.py` | Session forgery | ✅ v3.5 |
+
+### 2.4 Input Validation & Safe Execution
+
+| # | Feature | File | Threat Addressed | Status |
+|---|---------|------|------------------|--------|
+| 21 | **`shell=False` subprocess** — all commands use argv lists | `main.py`, `rat_client.py` | CWE-78 | ✅ PR #10 |
+| 22 | **Shell metacharacter blocklist** — rejects `\|&;<>()`$\n\r` | `c2_server.py`, `rat_client.py` | Defense-in-depth | ✅ PR #10 |
+| 23 | **Windows built-in wrapper** — `dir`/`cd`/`echo` auto-wrapped as `cmd /c <cmd>` | `rat_client.py` | Functionality | ✅ v3.5 |
+| 24 | **Filesystem sandbox** — path validation via `os.path.realpath` + `os.path.commonpath` | `rat_client.py` | CWE-22 | ✅ v3.5 |
+| 25 | **HTTPS-only URL scheme** — `urlopen` rejects non-HTTPS | `rat_client.py` (gps handler) | CWE-22 | ✅ Phase 3 |
+| 26 | **Rate limiting on `/register`** — 5 requests/min/IP | `c2_server.py` | DoS | ✅ v3.5 |
+| 27 | **Victim cap** — max 100 concurrent, evict oldest offline | `c2_server.py` | DoS | ✅ v3.5 |
+| 28 | **Command ID deduplication** — client keeps last 500 processed IDs | `rat_client.py` | Re-execution | ✅ v3.5 |
 
 ### 2.5 Supply Chain Security
 
 | # | Feature | File | Threat Addressed | Status |
 |---|---------|------|------------------|--------|
-| 15 | **Dependabot alerts** | GitHub settings | CVE exposure | ✅ Enabled |
-| 16 | **Dependabot security updates** | GitHub settings | CVE remediation | ✅ Enabled |
-| 17 | **Dependabot version updates** | `.github/dependabot.yml` | Dependency rot | ✅ Enabled |
-| 18 | **7-day cooldown** — delays updates | `.github/dependabot.yml` | Supply chain attacks | ✅ Phase 3 |
-| 19 | **Secret scanning + push protection** | GitHub settings | Credential leakage | ✅ Enabled |
-| 20 | **Reduced dependency footprint** — 20+ → 11 | `requirements.txt` | Attack surface | ✅ Phase 1 |
+| 29 | **Dependabot alerts** | GitHub settings | CVE exposure | ✅ |
+| 30 | **Dependabot security updates** | GitHub settings | CVE remediation | ✅ |
+| 31 | **Dependabot version updates** | `.github/dependabot.yml` | Dependency rot | ✅ |
+| 32 | **7-day cooldown** | `.github/dependabot.yml` | Supply chain attacks | ✅ Phase 3 |
+| 33 | **Secret scanning + push protection** | GitHub settings | Credential leakage | ✅ |
+| 34 | **Reduced dependency footprint** — 20+ → 13 | `requirements.txt` | Attack surface | ✅ |
+| 35 | **`.gitignore` covers secrets** — `.env`, `cert.pem`, `key.pem`, `victims_state.json` | `.gitignore` | CWE-798 | ✅ v3.5 |
 
 ### 2.6 Client Hardening
 
 | # | Feature | File | Purpose | Status |
 |---|---------|------|---------|--------|
-| 21 | **Graceful fallback if Chrome unavailable** | `rat_client.py` | Availability | ✅ PR #14 |
-| 22 | **Headless Chrome stealth flags** | `rat_client.py` | Bot-detection evasion | ✅ PR #14 |
-| 23 | **Auto-grant media permissions** | `rat_client.py` | Isolated-browser bypass | ✅ PR #14 |
+| 36 | **Graceful fallback if Chrome unavailable** | `rat_client.py` | Availability | ✅ PR #14 |
+| 37 | **Headless Chrome stealth flags** | `rat_client.py` | Bot-detection evasion | ✅ PR #14 |
+| 38 | **Auto-grant media permissions** | `rat_client.py` | Isolated-browser bypass | ✅ PR #14 |
+| 39 | **Embedded config** — `EMBEDDED_CONFIG` dict for PyInstaller builds | `rat_client.py` | Offline operation | ✅ v3.5 |
+| 40 | **Auto-register on double-click** — `.exe` with no args auto-registers | `rat_client.py` | Usability | ✅ v3.5 |
+| 41 | **ACK after execution** — client confirms command done via `/ack` | `rat_client.py` | Reliable queue | ✅ v3.5 |
 
-### 2.7 Runtime Isolation
-
-| # | Feature | File | Purpose | Status |
-|---|---------|------|---------|--------|
-| 24 | **Non-root Docker user** | `Dockerfile` | Container escape mitigation | ✅ Phase 5 |
-| 25 | **Healthcheck** | `Dockerfile` | Availability monitoring | ✅ Phase 5 |
-| 26 | **Read-only root FS** | `docker-compose.yml` | Tamper resistance | ✅ Phase 5 |
-| 27 | **Capability drop** | `docker-compose.yml` | Least privilege | ✅ Phase 5 |
-| 28 | **no-new-privileges** | `docker-compose.yml` | Privilege escalation | ✅ Phase 5 |
-| 29 | **Localhost-only port binding** | `docker-compose.yml` | Network exposure | ✅ Phase 5 |
-| 30 | **Resource limits** | `docker-compose.yml` | DoS mitigation | ✅ Phase 5 |
-
-### 2.8 Software Integrity
+### 2.7 Anti-Forensic Self-Destruct
 
 | # | Feature | File | Purpose | Status |
 |---|---------|------|---------|--------|
-| 31 | **Branch protection ruleset** | GitHub rulesets | Prevent accidental changes | ✅ Enabled |
-| 32 | **Required status checks** — Security Scan + Unit Tests | GitHub rulesets | CI enforcement | ✅ Phase 4 |
-| 33 | **Block force pushes + deletions** | GitHub rulesets | History preservation | ✅ Enabled |
-| 34 | **Bypass audit trail** | GitHub push output | Accountability | ✅ Verified |
+| 42 | **Registry cleanup** — HKCU Run key + RunMRU + RecentDocs | `rat_client.py` | Forensics | ✅ v3.5 |
+| 43 | **Temp file sweep** — `_cr_*.bat`, `cyberrecon_chrome_*` | `rat_client.py` | Forensics | ✅ v3.5 |
+| 44 | **Sandbox wipe** | `rat_client.py` | Forensics | ✅ v3.5 |
+| 45 | **Payload binary self-delete** — detached `cmd.exe` after 3s | `rat_client.py` | Forensics | ✅ v3.5 |
+| 46 | **Server-side record purge** — `/self_destruct_notify` endpoint | `c2_server.py` | Data hygiene | ✅ v3.5 |
 
-### 2.9 Static Analysis
+### 2.8 Runtime Isolation
+
+| # | Feature | File | Purpose | Status |
+|---|---------|------|---------|--------|
+| 47 | **Non-root Docker user** | `Dockerfile` | Container escape mitigation | ✅ Phase 5 |
+| 48 | **Healthcheck** | `Dockerfile` | Availability monitoring | ✅ Phase 5 |
+| 49 | **Read-only root FS** | `docker-compose.yml` | Tamper resistance | ✅ Phase 5 |
+| 50 | **Capability drop** | `docker-compose.yml` | Least privilege | ✅ Phase 5 |
+| 51 | **no-new-privileges** | `docker-compose.yml` | Privilege escalation | ✅ Phase 5 |
+| 52 | **Fail-closed compose secrets** — `${VAR:?error}` syntax | `docker-compose.yml` | Missing-secret detection | ✅ v3.5 |
+| 53 | **Resource limits** | `docker-compose.yml` | DoS mitigation | ✅ Phase 5 |
+
+### 2.9 Software Integrity
+
+| # | Feature | File | Purpose | Status |
+|---|---------|------|---------|--------|
+| 54 | **Branch protection ruleset** | GitHub rulesets | Prevent accidental changes | ✅ |
+| 55 | **Required status checks** — Security Scan + Unit Tests | GitHub rulesets | CI enforcement | ✅ Phase 4 |
+| 56 | **Block force pushes + deletions** | GitHub rulesets | History preservation | ✅ |
+| 57 | **Bypass audit trail** | GitHub push output | Accountability | ✅ |
+
+### 2.10 Static Analysis
 
 | # | Feature | Tool | Purpose | Status |
 |---|---------|------|---------|--------|
-| 35 | **Bandit Python SAST** | Bandit 1.9.4 | CWE-focused detection | ✅ 0 HIGH |
-| 36 | **Semgrep pattern SAST** | Semgrep 1.178.0 | OWASP Top 10 rules | ✅ 0 findings |
-| 37 | **pip-audit dependency scan** | pip-audit 2.10.1 | CVE detection | ✅ 0 CVEs |
-| 38 | **Ruff linter** | Ruff 0.16.9 | Style + security rules | ✅ All checks passed |
-| 39 | **CI automation** | GitHub Actions | Runs all tools on push/PR | ✅ Phase 4 |
+| 58 | **Bandit Python SAST** | Bandit | CWE-focused detection | ✅ 0 HIGH |
+| 59 | **Semgrep pattern SAST** | Semgrep | OWASP Top 10 | ✅ 0 findings |
+| 60 | **pip-audit dependency scan** | pip-audit | CVE detection | ✅ 0 CVEs |
+| 61 | **Ruff linter** | Ruff | Style + security | ✅ All checks passed |
+| 62 | **CI automation** | GitHub Actions | Every push/PR | ✅ Phase 4 |
 
-### 2.10 Documentation & Ethics
+### 2.11 Documentation & Ethics
 
 | # | Feature | File | Purpose | Status |
 |---|---------|------|---------|--------|
-| 40 | **ETHICS.md** | Repo root | Responsible research | ✅ |
-| 41 | **Published IOCs** | ETHICS.md | Research contribution | ✅ |
-| 42 | **MIT + research clause license** | LICENSE | Legal clarity | ✅ |
-| 43 | **README ethics banner** | README.md | Visibility | ✅ |
+| 63 | **ETHICS.md** | Repo root | Responsible research | ✅ |
+| 64 | **Published IOCs** | ETHICS.md | Research contribution | ✅ |
+| 65 | **MIT + research clause license** | LICENSE | Legal clarity | ✅ |
+| 66 | **README ethics banner** | README.md | Visibility | ✅ |
+| 67 | **Trust boundary documentation** — DFDs with dashed boundaries | `docs/diagrams/dfd-*.puml` | Threat modeling | ✅ v3.5 |
+
+**Total: 67 controls** (43 v3.0 + 24 v3.5)
 
 ---
 
@@ -134,16 +158,19 @@ def queue_command(victim_id):
     ...
 ```
 
-**After (fixed in PR #8):**
+**After (v3.0 PR #8 + v3.5):**
 
 ```python
 @app.route("/command/<victim_id>", methods=["POST"])
+@require_dashboard_login
 @require_operator_token
 def queue_command(victim_id):
     ...
 ```
 
 **Impact:** Without auth, anyone with network access could queue RAT commands. **CVSS: 8.6 (High).**
+
+**v3.5 addition:** `/dashboard`, `/victims`, `/victim/<id>`, `/exfil-data/<id>`, `/latest_screenshot/<id>`, `/latest_webcam/<id>` now require session login. Previously these leaked victim metadata to any anonymous caller.
 
 ### 3.2 CWE-295: Improper Certificate Validation
 
@@ -154,13 +181,20 @@ requests.packages.urllib3.disable_warnings()
 session.get(url, verify=False)  # accepts ANY cert
 ```
 
-**After (PR #9):**
+**After (PR #9 + v3.5):**
 
 ```python
-session.verify = ca_bundle if ca_bundle else True
+# Default: verify = True (system CAs)
+self.session.verify = ca_bundle if ca_bundle else True
+
+# Opt-in for self-signed lab deployments:
+if os.getenv("CYBERRECON_ALLOW_SELFSIGNED", "").lower() == "true":
+    self.session.verify = False
 ```
 
 **Impact:** MITM could intercept/modify C2 traffic. **CVSS: 6.8 (Medium).**
+
+**v3.5 addition:** self-signed acceptance is now explicit opt-in (env var), not default.
 
 ### 3.3 CWE-78: OS Command Injection
 
@@ -170,17 +204,20 @@ session.verify = ca_bundle if ca_bundle else True
 subprocess.run(" ".join(cmd.get("args", ["whoami"])), shell=True, ...)
 ```
 
-**After (PR #10):**
+**After (PR #10 + v3.5):**
 
 ```python
-BLOCKED = set("|&;<>()`$\\\"'\n\r")
-if any(ch in raw for ch in BLOCKED):
-    return
+blocked = set("|&;<>`$\n\r")
+if any(ch in raw for ch in blocked):
+    return jsonify({"error": f"Blocked metacharacters: {raw}"}), 400
+
 argv = shlex.split(raw)
-subprocess.run(argv, shell=False, ...)
+subprocess.run(argv, shell=False, timeout=15)
 ```
 
 **Impact:** Attacker could inject `whoami; rm -rf /`. **CVSS: 9.8 (Critical).**
+
+**v3.5 addition:** timeout added (15s); Windows built-ins auto-wrapped in `cmd /c`.
 
 ### 3.4 CWE-22: Path Traversal
 
@@ -190,15 +227,21 @@ subprocess.run(argv, shell=False, ...)
 os.startfile(decoy_dst)  # no validation
 ```
 
-**After (PR #11):**
+**After (PR #11 + v3.5):**
 
 ```python
-if not _is_safe_path(decoy_src, base_dir): return
-if not decoy_src.lower().endswith(".pdf"): return
-os.startfile(decoy_dst)
+def _is_in_sandbox(path):
+    real = os.path.realpath(os.path.expanduser(path))
+    root = os.path.realpath(SANDBOX_DIR)
+    return os.path.commonpath([real, root]) == root
+
+if not _is_in_sandbox(filepath):
+    return "outside sandbox"
 ```
 
-**Impact:** Crafted payloads could execute arbitrary files via Windows shell association. **CVSS: 7.5 (High).**
+**Impact:** Crafted payloads could execute arbitrary files. **CVSS: 7.5 (High).**
+
+**v3.5 addition:** sandbox path is now env-configurable (`CYBERRECON_SANDBOX`).
 
 ### 3.5 CWE-330: Weak Randomness
 
@@ -209,14 +252,17 @@ victim_id = str(uuid.uuid4())[:8]   # 32 bits
 cmd["id"] = str(uuid.uuid4())[:6]   # 24 bits
 ```
 
-**After (PR #12):**
+**After (PR #12 + v3.5):**
 
 ```python
-victim_id = secrets.token_hex(8)    # 64 bits CSPRNG
-cmd["id"] = secrets.token_hex(4)    # 32 bits CSPRNG
+victim_id = secrets.token_hex(16)   # 128 bits CSPRNG
+cmd["id"] = secrets.token_hex(8)    # 64 bits CSPRNG
+nonce = secrets.token_bytes(12)     # 96 bits CSPRNG (AES-GCM)
 ```
 
 **Impact:** Victim IDs were brute-forceable. **CVSS: 5.3 (Medium).**
+
+**v3.5 addition:** victim ID space doubled from 64 to 128 bits; AES-GCM nonce is CSPRNG.
 
 ### 3.6 CWE-798: Hardcoded Credentials
 
@@ -228,14 +274,19 @@ parser.add_argument("--c2", default="http://11.12.25.98:8443", ...)
 SFX_PASSWORD = "CyberRecon2024"
 ```
 
-**After (PR #13 + Phase 3):**
+**After (PR #13 + Phase 3 + v3.5):**
 
 ```python
 C2_URL = os.getenv("CYBERRECON_C2", "http://127.0.0.1:8443")
 SFX_PASSWORD = os.getenv("CYBERRECON_SFX_PASSWORD", secrets.token_urlsafe(24))
+# All v3.5 secrets from env vars:
+# CYBERRECON_KEY, CYBERRECON_VICTIM_KEY, CYBERRECON_DASHBOARD_PASSWORD,
+# CYBERRECON_SECRET_KEY, CYBERRECON_OPERATOR_TOKEN
 ```
 
 **Impact:** Source inspection revealed the C2 endpoint. **CVSS: 7.5 (High).**
+
+**v3.5 addition:** five secrets now required via env vars; `.env.example` uses placeholder text.
 
 ### 3.7 Anti-Pattern: `os.system(f"...")` in Launcher
 
@@ -272,7 +323,7 @@ except:
 ```python
 try:
     risky_operation()
-except Exception:  # noqa: BLE001
+except Exception:
     pass
 ```
 
@@ -285,23 +336,91 @@ except Exception:  # noqa: BLE001
 Stealth modules intentionally swallow exceptions to avoid triggering host-side logging or alerts. This is the design intent of anti-forensics code. Documented in `pyproject.toml`:
 
 ```toml
-"modules/stealth.py" = ["E722", "S110"]
-"modules/persistence.py" = ["E722", "S110"]
+"rat_client.py" = ["S603", "S607", "E402"]
+"c2_server.py" = ["S110", "S603", "E402"]
 ```
+
+### 3.10 CWE-311: Missing Encryption of Sensitive Data (v3.5)
+
+**Before:**
+
+```python
+payload = base64.b64encode(json.dumps(command_dict).encode()).decode()
+qr.add_data(payload)  # plaintext JSON in QR
+```
+
+**After:**
+
+```python
+raw = json.dumps(command_dict, sort_keys=True).encode()
+if _aesgcm:
+    nonce = secrets.token_bytes(12)
+    ct = _aesgcm.encrypt(nonce, raw, None)
+    payload = base64.b64encode(nonce + ct).decode()
+else:
+    payload = base64.b64encode(raw).decode()
+```
+
+**Impact:** Passive QR capture revealed all commands in plaintext. **CVSS: 6.5 (Medium).**
+
+### 3.11 CWE-384: Session Fixation (v3.5)
+
+**Before:** No session management — the v3.0 dashboard was unauthenticated.
+
+**After:**
+
+```python
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        pw = (request.form.get("password") or "").strip()
+        if not pw or not secrets.compare_digest(pw, DASHBOARD_PASSWORD):
+            time.sleep(0.4)
+            return login_page("Invalid password"), 401
+        session.clear()                       # prevent fixation
+        session["logged_in"] = True
+        session.permanent = True
+        return redirect("/dashboard")
+```
+
+**Impact:** Attacker could pre-set a session cookie and hijack after legitimate login. **CVSS: 6.1 (Medium).**
+
+### 3.12 CWE-613: Insufficient Session Expiration (v3.5)
+
+**After:**
+
+```python
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=_HAS_TLS,
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=SESSION_HOURS),
+)
+```
+
+**Impact:** Sessions could live indefinitely. **CVSS: 4.3 (Low).**
+
+### 3.13 CWE-539: Persistent Cookies (v3.5)
+
+**After:** session cookie flags are `HttpOnly=True`, `Secure=_HAS_TLS`, `SameSite="Lax"`.
+
+**Impact:** Cookies accessible to JS or sent over HTTP. **CVSS: 4.2 (Low).**
 
 ---
 
-## 4. Defense-in-Depth Summary
+## 4. Defense-in-Depth Summary (v3.5)
 
 | Layer | Controls |
 |-------|----------|
-| **Perimeter** | Operator token auth, TLS verification |
-| **Application** | Input validation, shell blocklist, path validation, CSPRNG IDs |
-| **Data** | base64 encoding, no hardcoded secrets |
-| **Runtime** | Non-root Docker user, read-only FS, capability drop, healthcheck |
-| **Supply Chain** | Dependabot, cooldown, secret scanning, minimal deps |
+| **Perimeter** | TLS (self-signed opt-in), dashboard login, operator token |
+| **Auth** | Session cookie (HttpOnly+Secure+SameSite), victim key, AES-GCM |
+| **Application** | Input validation, shell blocklist, sandbox, CSPRNG IDs |
+| **Data** | AES-256-GCM, base64url, no hardcoded secrets |
+| **Runtime** | Non-root Docker, read-only FS, cap_drop, fail-closed compose |
+| **Supply Chain** | Dependabot + 7-day cooldown, secret scanning, 13 deps |
 | **Process** | Branch protection, CI enforcement, SAST automation |
-| **Documentation** | ETHICS.md, IOCs, LICENSE |
+| **Anti-Forensics** | Registry/temp/sandbox wipe, payload self-delete |
+| **Documentation** | ETHICS.md, IOCs, LICENSE, trust boundaries |
 
 ---
 
@@ -312,21 +431,21 @@ All security controls verified by:
 1. **Unit tests** in `tests/` (where applicable)
 2. **SAST tool output** in `reports/`
 3. **CI status checks** (Security Scan + Unit Tests must pass)
-4. **Manual penetration tests** (documented in Phase 3 verification)
+4. **Two-machine LAN demo** (v3.5)
 5. **GitHub audit trail** (ruleset bypass events)
 
 See `docs/report/08-security-testing.md` for full evidence.
 
 ---
 
-## 6. Compliance Mapping
+## 6. Compliance Mapping (v3.5)
 
 | Framework | Coverage |
 |-----------|----------|
-| OWASP Top 10 (2021) | A01, A03, A05, A07, A09 |
-| CWE Top 25 | CWE-22, CWE-78, CWE-79, CWE-259, CWE-295, CWE-306, CWE-330, CWE-798 |
+| OWASP Top 10 (2021) | A01, A02, A03, A05, A07, A09 |
+| CWE Top 25 | CWE-22, CWE-78, CWE-79, CWE-259, CWE-295, CWE-306, CWE-311, CWE-330, CWE-384, CWE-539, CWE-613, CWE-798 |
 | NIST SSDF | PW.4, PW.6, RV.1 |
-| ISO 27001 | A.8.8, A.8.28, A.14.2 |
+| ISO 27001 | A.8.8, A.8.24, A.8.28, A.14.2 |
 
 ---
 
@@ -334,16 +453,15 @@ See `docs/report/08-security-testing.md` for full evidence.
 
 - `docs/report/06-threat-model.md`
 - `docs/report/08-security-testing.md`
+- `docs/report/10-hardening-changelog.md`
 - `ETHICS.md`
 - `reports/*.json`
 
 ---
 
-> **Update (v3.5) — 2026-10-03:** Five additional controls added — AES-256-GCM QR payload encryption, victim shared-key auth, dashboard login, server-side wipe endpoint, and anti-forensic self-destruct. See [`10-hardening-changelog.md`](10-hardening-changelog.md) for the full catalog.
-
-
 ## 8. Change Log
 
-| Date | Change | Author |
-|------|--------|--------|
-| 2026-09-30 | Initial security features catalog | R Jeevan |
+| Date | Version | Change | Author |
+|------|---------|--------|--------|
+| 2026-09-30 | 1.0 | Initial security features catalog (43 controls) | R Jeevan |
+| 2026-10-03 | 2.0 | v3.5 rewrite: 24 new controls, 4 new CWEs, 5-layer auth model | R Jeevan |
