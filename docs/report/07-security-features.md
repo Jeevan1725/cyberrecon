@@ -330,6 +330,9 @@ See `docs/report/08-security-testing.md` for full evidence.
 
 ---
 
+> **Update (v3.5) — 2026-10-03:** Five additional controls added — AES-256-GCM QR payload encryption, victim shared-key auth, dashboard login, server-side wipe endpoint, and anti-forensic self-destruct. See [`10-hardening-changelog.md`](10-hardening-changelog.md) for the full catalog.
+
+
 ## 8. Change Log
 
 | Date | Change | Author |
