@@ -33,11 +33,11 @@ from functools import wraps
 from io import BytesIO
 
 from dotenv import load_dotenv
+
 load_dotenv(dotenv_path=".env", override=True)
 
 import qrcode
-from flask import (Flask, jsonify, render_template_string, request,
-                   send_file, session, redirect)
+from flask import Flask, jsonify, redirect, render_template_string, request, send_file, session
 from qrcode.constants import ERROR_CORRECT_H
 
 try:
