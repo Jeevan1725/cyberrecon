@@ -1,17 +1,43 @@
 # 08 — Security Testing Report
 
 **Project:** CyberRecon — QR-Code-Based C2 Framework
-**Phase:** 3 — SAST / SCA Remediation
-**Date:** 2026-09-30
+**Phase:** 3 (v3.0) + Phase 5 (v3.5 hardening)
+**Last update:** 2026-10-03
 **Author:** R Jeevan
 
 ---
 
-## 1. Overview
+## 0. v3.5 Addendum (2026-10-03)
+
+The v3.5 hardening pass added five new security controls (see `10-hardening-changelog.md`). The SAST toolchain was re-run against the updated codebase.
+
+**Live results:** The current status is reflected by the CI badge in the top-level README. CI runs the same pipeline (Bandit, Semgrep, pip-audit, Ruff) on every push and PR.
+
+**New controls verified clean on v3.5:**
+
+| Control | Verified |
+|---|---|
+| AES-256-GCM QR payload encryption (`protect_payload`) | No new Bandit findings |
+| Victim shared-key auth (`require_victim_key`) | No new findings |
+| Dashboard login + session cookie | No new findings |
+| `SelfDestructor` anti-forensic sweep | `# nosec B110` annotations added inline |
+| `/self_destruct_notify` endpoint | No new findings |
+
+**New `# nosec` annotations** (v3.5 code):
+
+- `B110` on `SelfDestructor._kill_persistence` — silent exception swallow is intentional (registry may not exist)
+- `B110` on `SelfDestructor._clean_run_mru` / `_clean_recent_docs` — same rationale
+- `B603` / `B607` on `subprocess.Popen(["cmd", "/c", bat], ...)` — list form, `shell=False`, no injection surface
+
+Historical v3.0 evidence is preserved below for before/after comparison.
+
+---
+
+## 1. Overview (v3.0 baseline)
 
 This report documents the static-analysis and dependency-scanning results for the CyberRecon codebase. Four industry-standard tools were run against the source tree, findings triaged, fixes applied where actionable, and remaining items documented as accepted risks.
 
-**Final state:**
+**Final state (v3.0):**
 
 - **0 HIGH severity findings** across all tools
 - **0 dependency CVEs**
@@ -218,7 +244,7 @@ No known vulnerabilities found
 
 **Dependencies scanned:** 11 direct dependencies — flask, requests, pillow, qrcode[pil], opencv-python, numpy, selenium, webdriver-manager, pynput, pyperclip, psutil.
 
-**Result:** All dependencies are current and free of known CVEs as of the scan date (2026-09-30).
+**v3.5 additions:** `cryptography>=42.0` and `python-dotenv>=1.0` were added; both are CVE-free as of 2026-10-03.
 
 ---
 
@@ -249,7 +275,7 @@ Auto-fixed categories: import sorting, unused imports, whitespace normalization,
 
 ### 7.3 Config-based Ignore Rules
 
-Added to `pyproject.toml`:
+`pyproject.toml` (updated in v3.5):
 
 ```toml
 [tool.ruff.lint]
@@ -264,14 +290,16 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106"]
-"rat_client.py" = ["S603", "S607"]
+"rat_client.py" = ["S603", "S607", "E402"]
 "modules/stealth.py" = ["E722", "S110"]
 "modules/persistence.py" = ["E722", "S110"]
 "modules/gps.py" = ["S310", "S112"]
-"c2_server.py" = ["S110"]
+"c2_server.py" = ["S110", "S603", "E402"]
 "aws_relay.py" = ["S104", "E722"]
 "modules/screenshot.py" = ["F401"]
 ```
+
+**v3.5 additions:** `E402` on `rat_client.py` and `c2_server.py` (embedded config requires imports after `load_dotenv()`); `S603` on `c2_server.py` (self-destruct cleanup uses `subprocess.Popen` with list form).
 
 ### 7.4 After Scan
 
@@ -287,10 +315,12 @@ All checks passed!
 | Rule | Count | Rationale |
 |------|-------|-----------|
 | Bandit B104 / Ruff S104 | 5 | C2 server and AWS relay must bind `0.0.0.0` by design. In production this sits behind a firewall/reverse proxy. |
-| Bandit B110 / Ruff S110 | 11 | Stealth modules intentionally swallow exceptions to avoid host-side logs/alerts. Design intent of anti-forensics code. |
+| Bandit B110 / Ruff S110 | 11 + 4 (v3.5) | Stealth modules intentionally swallow exceptions to avoid host-side logs/alerts. Design intent of anti-forensics code. |
 | Bandit B112 / Ruff S112 | 1 | GPS iterates fallback geolocation services; continuing on failure is expected. |
 | Ruff E722 | 6 | Bare `except:` in legacy stealth code. Impact low; changing risks altering victim-side behavior. Technical debt. |
 | Semgrep `request-with-http` | 1 | ip-api.com free tier lacks HTTPS. Only public geolocation data exchanged — no credentials. |
+| Ruff E402 (v3.5) | — | Imports after `load_dotenv()` are required by the embedded-config pattern in `rat_client.py` and `c2_server.py`. |
+| Bandit B603/B607 (v3.5) | — | `subprocess.Popen(["cmd", "/c", bat], ...)` uses the list form with `shell=False`. No injection surface. |
 
 ---
 
@@ -305,6 +335,7 @@ All checks passed!
 4. **Remediation** — created `fix/sast-findings` branch; applied fixes.
 5. **Verification** — re-ran all tools; confirmed findings eliminated.
 6. **Documentation** — this report + machine-readable artifacts.
+7. **Re-verification (v3.5)** — after adding five new controls, re-ran all four tools via CI on every push/PR.
 
 ---
 
@@ -325,6 +356,8 @@ reports/
 └── ruff.txt               # Lint scan (all checks passed)
 ```
 
+**v3.5 live evidence:** see the CI workflow runs at `.github/workflows/ci.yml` — every push re-runs the pipeline and uploads artifacts.
+
 ---
 
 ## 11. Compliance Mapping
@@ -336,12 +369,16 @@ reports/
 | B310 (urlopen scheme) | CWE-22 | A01:2021 — Broken Access Control |
 | B104 (bind all interfaces) | CWE-605 | A05:2021 — Security Misconfiguration |
 | B110 (try/except/pass) | CWE-703 | A09:2021 — Security Logging Failures |
+| AES-GCM missing (v3.5) | CWE-311 | A02:2021 — Cryptographic Failures |
+| Session fixation (v3.5) | CWE-384 | A07:2021 — Identification & Auth Failures |
+| Session lifetime (v3.5) | CWE-613 | A07:2021 — Identification & Auth Failures |
+| Persistent cookies (v3.5) | CWE-539 | A05:2021 — Security Misconfiguration |
 
 ---
 
 ## 12. Conclusion
 
-The CyberRecon codebase passed a full SAST + SCA sweep:
+The CyberRecon codebase passed a full SAST + SCA sweep at v3.0 and again at v3.5:
 
 - **0 HIGH severity findings** (was 4)
 - **0 dependency CVEs**
