@@ -42,14 +42,38 @@ services:
 
     # ---------- Networking ----------
     ports:
-        - "0.0.0.0:8443:8443"
+      - "0.0.0.0:8443:8443"
 
-    # ---------- Environment ----------
+    # ---------- Environment (v3.5 hardened) ----------
+    # All secrets must be supplied via the host environment or a .env file.
+    # Generate values with:
+    #   python -c "import os,base64; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"   # CYBERRECON_KEY
+    #   python -c "import secrets; print(secrets.token_urlsafe(32))"                              # OPERATOR_TOKEN, VICTIM_KEY
+    #   python -c "import secrets,string; a=string.ascii_letters+string.digits; print(''.join(secrets.choice(a) for _ in range(24)))"  # DASHBOARD_PASSWORD
+    #   python -c "import secrets; print(secrets.token_urlsafe(48))"                              # SECRET_KEY
     environment:
+      # Server bind
       - C2_HOST=0.0.0.0
       - C2_PORT=8443
-      - CYBERRECON_REQUIRE_AUTH=true
-      - CYBERRECON_OPERATOR_TOKEN=${CYBERRECON_OPERATOR_TOKEN:-change-me-in-env}
+
+      # Operator authentication
+      - CYBERRECON_OPERATOR_TOKEN=${CYBERRECON_OPERATOR_TOKEN:?CYBERRECON_OPERATOR_TOKEN is required}
+      - CYBERRECON_REQUIRE_AUTH=${CYBERRECON_REQUIRE_AUTH:-true}
+
+      # Victim authentication
+      - CYBERRECON_VICTIM_KEY=${CYBERRECON_VICTIM_KEY:?CYBERRECON_VICTIM_KEY is required}
+      - CYBERRECON_REQUIRE_VICTIM_KEY=${CYBERRECON_REQUIRE_VICTIM_KEY:-true}
+
+      # AES-256-GCM QR payload encryption
+      - CYBERRECON_KEY=${CYBERRECON_KEY:?CYBERRECON_KEY is required}
+
+      # Dashboard login + session
+      - CYBERRECON_DASHBOARD_PASSWORD=${CYBERRECON_DASHBOARD_PASSWORD:?CYBERRECON_DASHBOARD_PASSWORD is required}
+      - CYBERRECON_SECRET_KEY=${CYBERRECON_SECRET_KEY:?CYBERRECON_SECRET_KEY is required}
+      - CYBERRECON_SESSION_HOURS=${CYBERRECON_SESSION_HOURS:-8}
+
+      # Filesystem sandbox (empty = default ~/CyberReconSandbox)
+      - CYBERRECON_SANDBOX=${CYBERRECON_SANDBOX:-}
 
     # ---------- Healthcheck ----------
     healthcheck:
