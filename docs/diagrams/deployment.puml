@@ -1,31 +1,62 @@
 @startuml
 skinparam packageStyle rectangle
-title CyberRecon - Deployment Diagram
+skinparam shadowing false
+title CyberRecon — Deployment Diagram (v3.5)
 
-node "Attacker VM (Linux)" as ATTACKER {
-    node "Docker Host" as DOCKER {
-        node "C2 Server Container\nPort 8443\nNon-root user" as C2
-        node "AWS Relay Container\nPort 443" as RELAY
+node "Server Machine\n(Linux / Windows / macOS)" as SERVER {
+    node "Docker Host\n(or local Python venv)" as DOCKER {
+        node "C2 Server\nPort 8443\nNon-root (UID 1000)\nread-only rootfs" as C2 {
+            artifact "c2_server.py" as C2PY
+            artifact "cert.pem + key.pem\n(self-signed TLS)" as TLS
+            artifact "victims_state.json" as STATE
+        }
+        node "AWS Relay (optional)\nPort 443" as RELAY
     }
-    RELAY ..> C2 : proxy
+    note bottom of SERVER
+      Firewall: inbound TCP 8443
+      Bind: 0.0.0.0:8443
+      Env: CYBERRECON_* (AES, tokens, dashboard pw)
+    end note
 }
 
-node "Victim VM (Windows)" as VICTIM {
-    node "RAT Client\nPython 3.11+" as RATC
-    node "Headless Chrome\nSelenium" as CHROME
-    node "Webcam Device" as CAM
-    node "File System" as FS
-    RATC --> CHROME
-    RATC --> CAM
-    RATC --> FS
+node "Victim Machine\n(Windows 10/11)" as VICTIM {
+    node "Implant\nPython 3.11+ or .exe" as RATC {
+        artifact "rat_client.py\n(or CyberReconClient.exe)" as RATPY
+        artifact "EMBEDDED_CONFIG\n(or .env)" as CFG
+    }
+    node "Headless Chrome\n(Selenium-controlled)" as CHROME
+    node "Webcam\n(OpenCV VideoCapture)" as CAM
+    node "Filesystem\n(sandbox: ~/CyberReconSandbox)" as FS
+    node "HKCU Registry\n(persistence + cleanup)" as REG
+
+    RATC --> CHROME : driver.get(/qr)
+    RATC --> CAM : frame grab
+    RATC --> FS : sandboxed file ops
+    RATC --> REG : self-destruct cleanup
 }
 
-node "GitHub" as GH {
-    node "CI Workflow\nBandit+pip-audit+Ruff+pytest" as CI
-    node "CD Workflow\nDocker build+release" as CD
+node "Operator Workstation" as OPMACHINE {
+    node "Browser\n(Chrome / Edge / Firefox)" as WEB {
+        artifact "/login" as LOGIN
+        artifact "/dashboard" as DASH
+    }
 }
 
-C2 --> CHROME : HTTPS QR PNG
-RATC --> C2 : HTTPS POST /exfil
+node "GitHub\n(github.com/Jeevan1725/cyberrecon)" as GH {
+    node "CI Workflow\nBandit + pip-audit + Ruff + pytest" as CI
+    node "CD Workflow\nDocker build + release" as CD
+    node "Dependabot\n(7-day cooldown)" as DEP
+}
+
+WEB --> C2 : HTTPS\n/login, /dashboard\n/command (session + X-Operator-Token)
+C2 --> WEB : HTTPS\nHTML, JSON exfil, ZIP
+
+RATC --> C2 : HTTPS\n/register, /qr?vkey=, /exfil\n/ack, /self_destruct_notify\n(header: X-Victim-Key)
+C2 --> RATC : HTTPS\nQR PNG (AES-256-GCM encrypted)
+
+CHROME --> C2 : HTTPS GET /qr/<id>\n(?vkey=<key>)
+
+RELAY ..> C2 : loopback proxy
+CI ..> GH : artifacts
 
 @enduml
