@@ -31,11 +31,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106"]
-"rat_client.py" = ["S603", "S607"]
+"rat_client.py" = ["S603", "S607", "E402"]
 "modules/stealth.py" = ["E722", "S110"]
 "modules/persistence.py" = ["E722", "S110"]
 "modules/gps.py" = ["S310", "S112"]
-"c2_server.py" = ["S110"]
+"c2_server.py" = ["S110", "S603", "E402"]
 "aws_relay.py" = ["S104", "E722"]
 
 [tool.pytest.ini_options]

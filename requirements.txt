@@ -27,3 +27,6 @@ webdriver-manager>=4.1.2
 pynput>=1.7.6
 pyperclip>=1.11.0
 psutil>=7.2.2
+
+cryptography>=42.0
+python-dotenv>=1.0
