@@ -63,3 +63,21 @@ cyberrecon.log
 docker-compose.override.yml
 # Local helper scripts
 scripts/
+
+
+# ==== CyberRecon v3.5 additions ====
+
+# TLS / certs
+cert.pem
+key.pem
+*.pem
+
+# Runtime state
+victims_state.json
+victims_state.json.*
+
+# Sandbox
+CyberReconSandbox/
+
+# Keep the example env tracked
+!.env.example
