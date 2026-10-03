@@ -56,7 +56,6 @@ import json
 import logging
 import platform
 import shutil
-import shlex
 import subprocess
 import tempfile
 import threading
