@@ -6,6 +6,8 @@
 **Authors:** Vekeshhari Rajasekar, R Jeevan
 
 ---
+> **Update (v3.5) — 2026-10-03:** Two runtime dependencies added: `cryptography>=42.0` (AES-256-GCM) and `python-dotenv>=1.0` (env loading). Dependency count is now 13 (was 11).
+
 
 ## 1. Purpose
 
