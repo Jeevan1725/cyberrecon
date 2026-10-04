@@ -199,10 +199,7 @@ class SelfDestructor:
                 try:
                     name = (proc.info["name"] or "").lower()
                     cmdline = " ".join(proc.info["cmdline"] or []).lower()
-                    if "chromedriver" in name or "chromedriver" in cmdline:
-                        proc.kill()
-                        killed += 1
-                    elif "chrome" in name and "--headless" in cmdline:
+                    if "chromedriver" in name or "chromedriver" in cmdline or "chrome" in name and "--headless" in cmdline:
                         proc.kill()
                         killed += 1
                 except Exception:
